@@ -1,0 +1,3 @@
+package hexa
+
+func HexVertices() {}
