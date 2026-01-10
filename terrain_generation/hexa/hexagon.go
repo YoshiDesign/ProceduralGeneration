@@ -96,8 +96,8 @@ func (hex *Hexagon) innerRadius() float32 {
 /* Using the cartesian coordinates, define the center point in euclidean space */
 func (h Hexagon) center() Vec3 {
 	R := h.Size_radius
-	q := float32(h.X)	
-	r := float32(h.Z)
+	q := float32(h.X) // Initialized from Axial space
+	r := float32(h.Z) // Initialized from Axial space
 
 	sqrt3 := float32(math.Sqrt(3))
 

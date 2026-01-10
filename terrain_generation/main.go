@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	GridW = 48
-	GridH = 32
-	CellSizePx = 32
+	GridW = 24
+	GridH = 16
+	CellSizePx = 48
 )
 
 var gridColor color.Color = color.RGBA{
