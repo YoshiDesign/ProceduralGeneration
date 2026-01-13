@@ -105,10 +105,12 @@ func (h Hexagon) center() Vec3 {
 	case PointyTop:
 		// Transcribe to euclidean space
 		cx := R * sqrt3 * (q + 0.5*float32(h.Z&1))
+		//cx := R * sqrt3 * (q + r /2)
 		cz := R * 1.5 * r
 		return Vec3{cx, float32(h.Y), cz}
 	case FlatTop:
 		cx := R * 1.5 * q
+		//cz := R * sqrt3 * (q + r /2)
 		cz := R * sqrt3 * (r + 0.5*float32(h.X&1))
 		return Vec3{cx, float32(h.Y), cz}
 	default:

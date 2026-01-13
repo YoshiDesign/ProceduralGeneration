@@ -1,3 +1,0 @@
-package hexa
-
-func HexVertices() {}
