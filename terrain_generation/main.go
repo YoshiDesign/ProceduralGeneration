@@ -4,34 +4,49 @@ import (
 	"log"
 	"math/rand"
 	"procedural_generation/terrain_generation/config"
+	"procedural_generation/terrain_generation/duals"
 	"procedural_generation/terrain_generation/hexa"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
+)
+
+// ViewMode determines which visualization is active.
+type ViewMode int
+
+const (
+	ViewHexa ViewMode = iota
+	ViewDuals
 )
 
 type App struct {
 	rng      *rand.Rand
-	//ts 	 	 hexa.TileSet
 	autoRun  bool
 	accum    float64
-	hexa	  hexa.HexaModule
+	hexa     hexa.HexaModule
+	duals    *duals.DualsDemo
+	viewMode ViewMode
 }
 
 func NewApp() *App {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	//tiles := hexa.MakeChunkTiles()
+
+	screenW := config.GridW * config.CellSizePx
+	screenH := config.GridH * config.CellSizePx
 
 	hexa_ := hexa.HexaModule{}
 	hexa_.Init()
 
+	dualsDemo := duals.NewDualsDemo(screenW, screenH)
+
 	return &App{
-		//ts: 	  tiles,
 		rng:      rng,
 		autoRun:  false,
-		hexa:	  hexa_,
+		hexa:     hexa_,
+		duals:    dualsDemo,
+		viewMode: ViewDuals, // Start with Delaunay terrain view
 	}
-
 }
 
 func (a *App) Layout(outsideW, outsideH int) (int, int) {
@@ -39,19 +54,28 @@ func (a *App) Layout(outsideW, outsideH int) (int, int) {
 }
 
 func (a *App) Draw(screen *ebiten.Image) {
-
-	a.hexa.Run(screen)
-
+	switch a.viewMode {
+	case ViewHexa:
+		a.hexa.Run(screen)
+	case ViewDuals:
+		a.duals.Draw(screen)
+	}
 }
 
-
 func (a *App) Update() error {
-
+	// Toggle view mode with Tab key
+	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
+		if a.viewMode == ViewHexa {
+			a.viewMode = ViewDuals
+		} else {
+			a.viewMode = ViewHexa
+		}
+	}
 	return nil
 }
 
 func main() {
-	ebiten.SetWindowTitle("Hexa")
+	ebiten.SetWindowTitle("Terrain Generation - Press Tab to toggle views")
 	ebiten.SetWindowSize(config.GridW*config.CellSizePx, config.GridH*config.CellSizePx)
 
 	app := NewApp()

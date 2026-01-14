@@ -129,3 +129,97 @@ func (m *DelaunayMesh) TriangleGradient(triID int, valuesAtSites []float64) (dhd
 func cross2(a, b Vec2) float64 {
 	return a.X*b.Y - a.Y*b.X
 }
+
+// TriangleNormal computes the face normal for a triangle given heights at each site.
+// The normal is computed using the cross product of two edges in 3D space.
+// Returns (normal, ok) where ok=false if the triangle is degenerate.
+//
+// For terrain: X = east, Y = up (height), Z = north.
+// CCW winding produces an upward-facing normal.
+func (m *DelaunayMesh) TriangleNormal(triID int, heights []float64) (Vec3, bool) {
+	if triID < 0 || triID >= len(m.Tris) {
+		return Vec3{}, false
+	}
+	if len(heights) < len(m.Sites) {
+		return Vec3{}, false
+	}
+
+	t := m.Tris[triID]
+
+	// Build 3D positions: (Pos.X, height, Pos.Y) where Pos.Y is Z in world space
+	a := Vec3{m.Sites[t.A].Pos.X, heights[t.A], m.Sites[t.A].Pos.Y}
+	b := Vec3{m.Sites[t.B].Pos.X, heights[t.B], m.Sites[t.B].Pos.Y}
+	c := Vec3{m.Sites[t.C].Pos.X, heights[t.C], m.Sites[t.C].Pos.Y}
+
+	// Two edges from vertex A
+	ab := b.Sub(a)
+	ac := c.Sub(a)
+
+	// Cross product gives the normal (CCW winding means this points "up")
+	n := ab.Cross(ac)
+	length := n.Len()
+	if length < 1e-12 {
+		return Vec3{0, 1, 0}, false // Degenerate, return default up
+	}
+
+	return n.Mul(1.0 / length), true
+}
+
+// TriangleNormalFromGradient computes the face normal from the height gradient.
+// This is an alternative method using the pre-computed gradient (dhdx, dhdz).
+//
+// The gradient represents the slope in X and Z directions. The normal is:
+//   n = normalize(-dhdx, 1, -dhdz)
+//
+// This method is efficient when you already have the gradient.
+func TriangleNormalFromGradient(dhdx, dhdz float64) Vec3 {
+	n := Vec3{-dhdx, 1.0, -dhdz}
+	return n.Normalize()
+}
+
+// AllFaceNormals computes face normals for all triangles in the mesh.
+// Returns a slice parallel to m.Tris containing the normalized face normal for each triangle.
+func (m *DelaunayMesh) AllFaceNormals(heights []float64) []Vec3 {
+	normals := make([]Vec3, len(m.Tris))
+	for i := range m.Tris {
+		n, ok := m.TriangleNormal(i, heights)
+		if !ok {
+			normals[i] = Vec3{0, 1, 0} // Default up for degenerate triangles
+		} else {
+			normals[i] = n
+		}
+	}
+	return normals
+}
+
+// SlopeAngle returns the slope angle in radians for a triangle.
+// 0 = flat, π/2 = vertical cliff.
+func (m *DelaunayMesh) SlopeAngle(triID int, heights []float64) (float64, bool) {
+	n, ok := m.TriangleNormal(triID, heights)
+	if !ok {
+		return 0, false
+	}
+
+	// Slope angle is the angle between the normal and the vertical (0, 1, 0)
+	// cos(angle) = n · (0,1,0) = n.Y
+	cosAngle := n.Y
+	if cosAngle > 1.0 {
+		cosAngle = 1.0
+	}
+	if cosAngle < -1.0 {
+		cosAngle = -1.0
+	}
+	return math.Acos(cosAngle), true
+}
+
+// SlopePercent returns the slope as a percentage (rise/run * 100).
+// A 45° slope returns 100%.
+func (m *DelaunayMesh) SlopePercent(triID int, heights []float64) (float64, bool) {
+	dhdx, dhdz, ok := m.TriangleGradient(triID, heights)
+	if !ok {
+		return 0, false
+	}
+	// Slope magnitude = sqrt(dhdx² + dhdz²)
+	slope := math.Sqrt(dhdx*dhdx + dhdz*dhdz)
+	return slope * 100.0, true
+}
