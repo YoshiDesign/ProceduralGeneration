@@ -3,11 +3,107 @@ package duals
 import (
 	"hash/fnv"
 	"math/rand"
+	"sync"
 )
 
 // ChunkCoord identifies a chunk by integer grid coordinates.
 type ChunkCoord struct {
 	X, Z int
+}
+
+// ChunkManager manages chunk generation and caching for optimized neighbor lookups.
+type ChunkManager struct {
+	mu         sync.RWMutex
+	cache      map[ChunkCoord]*TerrainChunk
+	cfg        ChunkConfig
+	heightFunc func(x, z float64) float64
+}
+
+// NewChunkManager creates a new chunk manager with the given configuration.
+func NewChunkManager(cfg ChunkConfig, heightFunc func(x, z float64) float64) *ChunkManager {
+	return &ChunkManager{
+		cache:      make(map[ChunkCoord]*TerrainChunk),
+		cfg:        cfg,
+		heightFunc: heightFunc,
+	}
+}
+
+// GetOrGenerate returns a cached chunk or generates and caches a new one.
+// This is the primary API for chunk access with caching optimization.
+func (cm *ChunkManager) GetOrGenerate(coord ChunkCoord) (*TerrainChunk, error) {
+	// Fast path: check if already cached
+	cm.mu.RLock()
+	if chunk, ok := cm.cache[coord]; ok {
+		cm.mu.RUnlock()
+		return chunk, nil
+	}
+	cm.mu.RUnlock()
+
+	// Slow path: generate with cache-aware point collection
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if chunk, ok := cm.cache[coord]; ok {
+		return chunk, nil
+	}
+
+	chunk, err := generateChunkWithCache(coord, cm.cfg, cm.heightFunc, cm.cache)
+	if err != nil {
+		return nil, err
+	}
+
+	cm.cache[coord] = chunk
+	return chunk, nil
+}
+
+// Get returns a cached chunk without generating. Returns nil if not cached.
+func (cm *ChunkManager) Get(coord ChunkCoord) *TerrainChunk {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.cache[coord]
+}
+
+// Evict removes a chunk from the cache, freeing memory.
+func (cm *ChunkManager) Evict(coord ChunkCoord) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	delete(cm.cache, coord)
+}
+
+// EvictOutsideRadius removes all chunks outside the given radius from center.
+func (cm *ChunkManager) EvictOutsideRadius(center ChunkCoord, radius int) int {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	evicted := 0
+	for coord := range cm.cache {
+		dx := coord.X - center.X
+		dz := coord.Z - center.Z
+		if dx*dx+dz*dz > radius*radius {
+			delete(cm.cache, coord)
+			evicted++
+		}
+	}
+	return evicted
+}
+
+// CacheSize returns the number of cached chunks.
+func (cm *ChunkManager) CacheSize() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return len(cm.cache)
+}
+
+// CachedCoords returns all cached chunk coordinates.
+func (cm *ChunkManager) CachedCoords() []ChunkCoord {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	coords := make([]ChunkCoord, 0, len(cm.cache))
+	for coord := range cm.cache {
+		coords = append(coords, coord)
+	}
+	return coords
 }
 
 // ChunkConfig holds parameters for terrain chunk generation.
@@ -131,7 +227,14 @@ func boundarySeed(worldSeed int64, coord1, coord2 ChunkCoord) int64 {
 
 // GenerateChunk creates a terrain chunk with Delaunay mesh, heights, and spatial index.
 // The heightFunc provides elevation for each site position.
+// This version does not use caching - for cached generation, use ChunkManager.
 func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float64) float64) (*TerrainChunk, error) {
+	return generateChunkWithCache(coord, cfg, heightFunc, nil)
+}
+
+// generateChunkWithCache creates a terrain chunk, optionally using a cache for neighbor lookups.
+// When cache is provided, it extracts halo points from cached neighbors instead of regenerating them.
+func generateChunkWithCache(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float64) float64, cache map[ChunkCoord]*TerrainChunk) (*TerrainChunk, error) {
 	chunk := &TerrainChunk{
 		Coord: coord,
 		Cfg:   cfg,
@@ -142,7 +245,7 @@ func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float
 	}
 
 	// Generate points: core region + halo regions for each neighbor
-	allPoints := generateChunkPoints(coord, cfg)
+	allPoints := generateChunkPointsWithCache(coord, cfg, cache)
 
 	// Track which points are in the core region
 	coreIndices := make([]int, 0, len(allPoints))
@@ -188,7 +291,15 @@ func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float
 
 // generateChunkPoints generates blue noise points for a chunk including halo regions.
 // Points in boundary regions are generated with shared seeds to ensure continuity.
+// Deprecated: Use generateChunkPointsWithCache for better performance.
 func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
+	return generateChunkPointsWithCache(coord, cfg, nil)
+}
+
+// generateChunkPointsWithCache generates blue noise points for a chunk including halo regions.
+// When cache is provided, it extracts halo points from cached neighbors (O(n) filter)
+// instead of regenerating them (O(n) blue noise generation per neighbor).
+func generateChunkPointsWithCache(coord ChunkCoord, cfg ChunkConfig, cache map[ChunkCoord]*TerrainChunk) []Vec2 {
 	minX := float64(coord.X) * cfg.ChunkSize
 	minZ := float64(coord.Z) * cfg.ChunkSize
 	maxX := float64(coord.X+1) * cfg.ChunkSize
@@ -210,13 +321,19 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 		return uint64(qx)<<32 | uint64(qz)&0xFFFFFFFF
 	}
 
+	addPoint := func(p Vec2) bool {
+		h := hashPoint(p)
+		if _, exists := seen[h]; !exists {
+			seen[h] = struct{}{}
+			allPoints = append(allPoints, p)
+			return true
+		}
+		return false
+	}
+
 	addPoints := func(pts []Vec2) {
 		for _, p := range pts {
-			h := hashPoint(p)
-			if _, exists := seen[h]; !exists {
-				seen[h] = struct{}{}
-				allPoints = append(allPoints, p)
-			}
+			addPoint(p)
 		}
 	}
 
@@ -225,7 +342,7 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 	corePoints := GenerateBlueNoiseSeeded(coreSeed, minX, minZ, maxX, maxZ, blueCfg)
 	addPoints(corePoints)
 
-	// 2. Generate halo points from each neighboring chunk's boundary region
+	// 2. Get halo points from each neighboring chunk
 	neighbors := []ChunkCoord{
 		{coord.X - 1, coord.Z - 1}, {coord.X, coord.Z - 1}, {coord.X + 1, coord.Z - 1},
 		{coord.X - 1, coord.Z}, {coord.X + 1, coord.Z},
@@ -249,8 +366,24 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 			continue // No overlap
 		}
 
-		// Use the neighbor's seed to generate their core points,
-		// then filter to points in our halo region
+		// Check if neighbor is cached - if so, extract points directly (fast path)
+		if cache != nil {
+			if cachedNeighbor, ok := cache[neighbor]; ok {
+				// Extract halo points from cached neighbor's sites
+				for _, site := range cachedNeighbor.Mesh.Sites {
+					p := site.Pos
+					// Check if point is in our halo region but not our core
+					inHalo := (p.X >= minX-halo && p.X < maxX+halo && p.Y >= minZ-halo && p.Y < maxZ+halo)
+					inCore := (p.X >= minX && p.X < maxX && p.Y >= minZ && p.Y < maxZ)
+					if inHalo && !inCore {
+						addPoint(p)
+					}
+				}
+				continue // Skip regeneration for this neighbor
+			}
+		}
+
+		// Fallback: regenerate neighbor's points (slow path)
 		neighborSeed := chunkSeed(cfg.WorldSeed, neighbor)
 		neighborPoints := GenerateBlueNoiseSeeded(neighborSeed, nMinX, nMinZ, nMaxX, nMaxZ, blueCfg)
 
@@ -259,11 +392,7 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 			inHalo := (p.X >= minX-halo && p.X < maxX+halo && p.Y >= minZ-halo && p.Y < maxZ+halo)
 			inCore := (p.X >= minX && p.X < maxX && p.Y >= minZ && p.Y < maxZ)
 			if inHalo && !inCore {
-				h := hashPoint(p)
-				if _, exists := seen[h]; !exists {
-					seen[h] = struct{}{}
-					allPoints = append(allPoints, p)
-				}
+				addPoint(p)
 			}
 		}
 	}
