@@ -278,7 +278,7 @@ func Triangulate(points []Vec2) []Triangle {
 		return nil
 	}
 
-	// Find bounding box TODO 
+	// Find bounding box
 	minX, maxX := points[0].X, points[0].X
 	minZ, maxZ := points[0].Y, points[0].Y
 	for _, p := range points {
