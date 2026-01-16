@@ -80,7 +80,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 			chunks = append(chunks, chunk)
 		}
 	}
-
+ 
 	// Scale to fit screen
 	totalWorldSize := cfg.ChunkSize * 2
 	scale := float64(min(screenW, screenH)) / totalWorldSize * 0.9
