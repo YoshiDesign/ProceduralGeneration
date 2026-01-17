@@ -1,4 +1,4 @@
-package duals2
+package duals
 
 import (
 	"image/color"
@@ -10,7 +10,8 @@ import (
 
 // DualsDemo is a visualization module for the Delaunay terrain system.
 type DualsDemo struct {
-	Chunks      []*TerrainChunk
+	Manager     *ChunkManager   // Chunk manager with caching
+	Chunks      []*TerrainChunk // Active chunks for rendering
 	ScreenW     int
 	ScreenH     int
 	Scale       float64 // pixels per world unit
@@ -45,11 +46,11 @@ func FractalNoise(x, z float64, octaves int, persistence, lacunarity float64) fl
     return total / maxValue  // Normalize to [-1, 1]
 }
 
-// NewDualsDemo creates a demo with a 2x2 grid of chunks.
+// NewDualsDemo creates a demo with a 2x2 grid of chunks using the ChunkManager.
 func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	cfg := ChunkConfig{
 		ChunkSize:    128.0,
-		MinPointDist: 12.0,
+		MinPointDist: 8.0,
 		HaloWidth:    12.0,
 		WorldSeed:    12345,
 	}
@@ -64,24 +65,28 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 		return h
 	}
 
-	// Generate a 2x2 grid of chunks
+	// Create chunk manager with caching
+	manager := NewChunkManager(cfg, heightFunc)
+
+	// Generate a 3x2 grid of chunks using the manager (benefits from caching)
 	chunks := make([]*TerrainChunk, 0, 6)
-	for cz := 0; cz < 2; cz++ {
-		for cx := 0; cx < 3; cx++ {
+	for cz := 0; cz < 1; cz++ {
+		for cx := 0; cx < 2; cx++ {
 			coord := ChunkCoord{X: cx, Z: cz}
-			chunk, err := GenerateChunk(coord, cfg, heightFunc)
+			chunk, err := manager.GetOrGenerate(coord)
 			if err != nil {
 				continue
 			}
 			chunks = append(chunks, chunk)
 		}
 	}
-
+ 
 	// Scale to fit screen
-	totalWorldSize := cfg.ChunkSize * 2
+	totalWorldSize := cfg.ChunkSize * 4
 	scale := float64(min(screenW, screenH)) / totalWorldSize * 0.9
 
 	return &DualsDemo{
+		Manager:     manager,
 		Chunks:      chunks,
 		ScreenW:     screenW,
 		ScreenH:     screenH,
@@ -187,7 +192,7 @@ func (d *DualsDemo) drawChunk(screen *ebiten.Image, chunk *TerrainChunk) {
 	for _, idx := range chunk.CoreSiteIndices {
 		site := mesh.Sites[idx]
 		sx, sy := d.worldToScreen(site.Pos.X, site.Pos.Y)
-		vector.DrawFilledCircle(screen, sx, sy, 2, siteColor, false)
+		vector.FillCircle(screen, sx, sy, 2, siteColor, false)
 	}
 }
 

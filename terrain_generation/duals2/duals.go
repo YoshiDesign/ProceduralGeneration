@@ -1,4 +1,4 @@
-package duals2
+package duals
 
 import (
 	"fmt"
@@ -33,6 +33,7 @@ func (a Vec3) Cross(b Vec3) Vec3 {
 	}
 }
 
+/* TODO: Midnight's default up is -Y */
 func (a Vec3) Normalize() Vec3 {
 	l := a.Len()
 	if l < 1e-12 {

@@ -1,13 +1,150 @@
-package duals2
+package duals
 
 import (
+	"fmt"
 	"hash/fnv"
 	"math/rand"
+	"sync"
 )
 
 // ChunkCoord identifies a chunk by integer grid coordinates.
 type ChunkCoord struct {
 	X, Z int
+}
+
+// ChunkManager manages chunk generation and caching for optimized neighbor lookups.
+type ChunkManager struct {
+	mu          sync.RWMutex
+	cache       map[ChunkCoord]*TerrainChunk
+	pointsCache map[ChunkCoord][]Vec2 // Raw blue noise points (before full chunk is built)
+	cfg         ChunkConfig
+	heightFunc  func(x, z float64) float64
+}
+
+// NewChunkManager creates a new chunk manager with the given configuration.
+func NewChunkManager(cfg ChunkConfig, heightFunc func(x, z float64) float64) *ChunkManager {
+	return &ChunkManager{
+		cache:       make(map[ChunkCoord]*TerrainChunk),
+		pointsCache: make(map[ChunkCoord][]Vec2),
+		cfg:         cfg,
+		heightFunc:  heightFunc,
+	}
+}
+
+// GetOrGenerate returns a cached chunk or generates and caches a new one.
+// This is the primary API for chunk access with caching optimization.
+func (cm *ChunkManager) GetOrGenerate(coord ChunkCoord) (*TerrainChunk, error) {
+	// Fast path: check if already cached
+	cm.mu.RLock()
+	if chunk, ok := cm.cache[coord]; ok {
+		cm.mu.RUnlock()
+		return chunk, nil
+	}
+	cm.mu.RUnlock()
+
+	// Slow path: generate with cache-aware point collection
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if chunk, ok := cm.cache[coord]; ok {
+		return chunk, nil
+	}
+
+	chunk, err := cm.generateChunkInternal(coord)
+	if err != nil {
+		return nil, err
+	}
+
+	cm.cache[coord] = chunk
+	return chunk, nil
+}
+
+// Get returns a cached chunk without generating. Returns nil if not cached.
+func (cm *ChunkManager) Get(coord ChunkCoord) *TerrainChunk {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.cache[coord]
+}
+
+// Evict removes a chunk from the cache, freeing memory.
+func (cm *ChunkManager) Evict(coord ChunkCoord) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	delete(cm.cache, coord)
+}
+
+// EvictOutsideRadius removes all chunks outside the given radius from center.
+func (cm *ChunkManager) EvictOutsideRadius(center ChunkCoord, radius int) int {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	evicted := 0
+	for coord := range cm.cache {
+		dx := coord.X - center.X
+		dz := coord.Z - center.Z
+		if dx*dx+dz*dz > radius*radius {
+			delete(cm.cache, coord)
+			evicted++
+		}
+	}
+	return evicted
+}
+
+// CacheSize returns the number of cached chunks.
+func (cm *ChunkManager) CacheSize() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return len(cm.cache)
+}
+
+// CachedCoords returns all cached chunk coordinates.
+func (cm *ChunkManager) CachedCoords() []ChunkCoord {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	coords := make([]ChunkCoord, 0, len(cm.cache))
+	for coord := range cm.cache {
+		coords = append(coords, coord)
+	}
+	return coords
+}
+
+// getOrGeneratePoints returns blue noise points for a chunk, using caches when available.
+// Priority: 1) Full chunk cache (Mesh.Sites), 2) Points cache, 3) Generate new.
+// Caller must hold at least a read lock on cm.mu.
+// If generation is needed, caller should hold a write lock.
+func (cm *ChunkManager) getOrGeneratePoints(coord ChunkCoord) []Vec2 {
+
+	// Check if points are cached.
+	if pts, ok := cm.pointsCache[coord]; ok {
+		fmt.Println("Grabbing point cache...")
+		return pts
+	}
+
+	// Optional sanity check. Check the chunk directly for the points
+	// This will never happen under normal circumstances. Caching points is an invariant to generating blue noise.
+	if chunk, ok := cm.cache[coord]; ok {
+		points := make([]Vec2, len(chunk.Mesh.Sites))
+		for i, site := range chunk.Mesh.Sites {
+			points[i] = site.Pos
+		}
+		fmt.Println("Uhhhh...")
+		return points
+	}
+
+	// 3. Generate blue noise and cache it
+	minX := float64(coord.X) * cm.cfg.ChunkSize
+	minZ := float64(coord.Z) * cm.cfg.ChunkSize
+	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
+	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
+
+	blueCfg := DefaultBlueNoiseConfig(cm.cfg.MinPointDist)
+	seed := chunkSeed(cm.cfg.WorldSeed, coord)
+	pts := GenerateBlueNoiseSeeded(seed, minX, minZ, maxX, maxZ, blueCfg)
+
+	// Cache the generated points
+	cm.pointsCache[coord] = pts
+	return pts
 }
 
 // ChunkConfig holds parameters for terrain chunk generation.
@@ -131,18 +268,27 @@ func boundarySeed(worldSeed int64, coord1, coord2 ChunkCoord) int64 {
 
 // GenerateChunk creates a terrain chunk with Delaunay mesh, heights, and spatial index.
 // The heightFunc provides elevation for each site position.
+// This version does not use caching - for cached generation, use ChunkManager.
 func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float64) float64) (*TerrainChunk, error) {
+	// Create a temporary ChunkManager for standalone generation (no caching benefit)
+	tempManager := NewChunkManager(cfg, heightFunc)
+	return tempManager.generateChunkInternal(coord)
+}
+
+// generateChunkInternal creates a terrain chunk using the ChunkManager's caches.
+// Caller must hold a write lock on cm.mu.
+func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, error) {
 	chunk := &TerrainChunk{
 		Coord: coord,
-		Cfg:   cfg,
-		MinX:  float64(coord.X) * cfg.ChunkSize,
-		MinZ:  float64(coord.Z) * cfg.ChunkSize,
-		MaxX:  float64(coord.X+1) * cfg.ChunkSize,
-		MaxZ:  float64(coord.Z+1) * cfg.ChunkSize,
+		Cfg:   cm.cfg,
+		MinX:  float64(coord.X) * cm.cfg.ChunkSize,
+		MinZ:  float64(coord.Z) * cm.cfg.ChunkSize,
+		MaxX:  float64(coord.X+1) * cm.cfg.ChunkSize,
+		MaxZ:  float64(coord.Z+1) * cm.cfg.ChunkSize,
 	}
 
 	// Generate points: core region + halo regions for each neighbor
-	allPoints := generateChunkPoints(coord, cfg)
+	allPoints := cm.generateChunkPoints(coord)
 
 	// Track which points are in the core region
 	coreIndices := make([]int, 0, len(allPoints))
@@ -158,8 +304,8 @@ func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float
 	heights := make([]float64, len(allPoints))
 	for i, p := range allPoints {
 		h := 0.0
-		if heightFunc != nil {
-			h = heightFunc(p.X, p.Y) // p.Y is Z in 2D
+		if cm.heightFunc != nil {
+			h = cm.heightFunc(p.X, p.Y) // p.Y is Z in 2D
 		}
 		sites[i] = Site{Pos: p, Height: h}
 		heights[i] = h
@@ -179,23 +325,23 @@ func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float
 
 	// Build spatial index
 	// Cell size roughly equal to minimum point distance for good performance
-	chunk.Spatial = BuildSpatialIndex(mesh, heights, cfg.MinPointDist,
-		chunk.MinX-cfg.HaloWidth, chunk.MinZ-cfg.HaloWidth,
-		chunk.MaxX+cfg.HaloWidth, chunk.MaxZ+cfg.HaloWidth)
+	chunk.Spatial = BuildSpatialIndex(mesh, heights, cm.cfg.MinPointDist,
+		chunk.MinX-cm.cfg.HaloWidth, chunk.MinZ-cm.cfg.HaloWidth,
+		chunk.MaxX+cm.cfg.HaloWidth, chunk.MaxZ+cm.cfg.HaloWidth)
 
 	return chunk, nil
 }
 
 // generateChunkPoints generates blue noise points for a chunk including halo regions.
-// Points in boundary regions are generated with shared seeds to ensure continuity.
-func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
-	minX := float64(coord.X) * cfg.ChunkSize
-	minZ := float64(coord.Z) * cfg.ChunkSize
-	maxX := float64(coord.X+1) * cfg.ChunkSize
-	maxZ := float64(coord.Z+1) * cfg.ChunkSize
+// Uses the point cache to avoid redundant blue noise generation for neighbors.
+// Caller must hold a write lock on cm.mu.
+func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
+	minX := float64(coord.X) * cm.cfg.ChunkSize
+	minZ := float64(coord.Z) * cm.cfg.ChunkSize
+	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
+	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
 
-	halo := cfg.HaloWidth
-	blueCfg := DefaultBlueNoiseConfig(cfg.MinPointDist)
+	halo := cm.cfg.HaloWidth
 
 	// We'll collect points from multiple regions
 	allPoints := make([]Vec2, 0, 1024)
@@ -204,28 +350,33 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 	// Hash a point to detect duplicates (within tolerance)
 	hashPoint := func(p Vec2) uint64 {
 		// Quantize to half the min distance for dedup
-		scale := 2.0 / cfg.MinPointDist
+		scale := 2.0 / cm.cfg.MinPointDist
 		qx := int64(p.X * scale)
 		qz := int64(p.Y * scale)
 		return uint64(qx)<<32 | uint64(qz)&0xFFFFFFFF
 	}
 
+	addPoint := func(p Vec2) bool {
+		h := hashPoint(p)
+		if _, exists := seen[h]; !exists {
+			seen[h] = struct{}{}
+			allPoints = append(allPoints, p)
+			return true
+		}
+		return false
+	}
+
 	addPoints := func(pts []Vec2) {
 		for _, p := range pts {
-			h := hashPoint(p)
-			if _, exists := seen[h]; !exists {
-				seen[h] = struct{}{}
-				allPoints = append(allPoints, p)
-			}
+			addPoint(p)
 		}
 	}
 
-	// 1. Generate core points for this chunk
-	coreSeed := chunkSeed(cfg.WorldSeed, coord)
-	corePoints := GenerateBlueNoiseSeeded(coreSeed, minX, minZ, maxX, maxZ, blueCfg)
+	// 1. Get or generate core points for this chunk (uses cache if available)
+	corePoints := cm.getOrGeneratePoints(coord)
 	addPoints(corePoints)
 
-	// 2. Generate halo points from each neighboring chunk's boundary region
+	// 2. Get halo points from each neighboring chunk
 	neighbors := []ChunkCoord{
 		{coord.X - 1, coord.Z - 1}, {coord.X, coord.Z - 1}, {coord.X + 1, coord.Z - 1},
 		{coord.X - 1, coord.Z}, {coord.X + 1, coord.Z},
@@ -234,10 +385,10 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 
 	for _, neighbor := range neighbors {
 		// The boundary region is where this chunk's halo overlaps the neighbor
-		nMinX := float64(neighbor.X) * cfg.ChunkSize
-		nMinZ := float64(neighbor.Z) * cfg.ChunkSize
-		nMaxX := float64(neighbor.X+1) * cfg.ChunkSize
-		nMaxZ := float64(neighbor.Z+1) * cfg.ChunkSize
+		nMinX := float64(neighbor.X) * cm.cfg.ChunkSize
+		nMinZ := float64(neighbor.Z) * cm.cfg.ChunkSize
+		nMaxX := float64(neighbor.X+1) * cm.cfg.ChunkSize
+		nMaxZ := float64(neighbor.Z+1) * cm.cfg.ChunkSize
 
 		// Compute the overlap region between our extended bounds and neighbor's core
 		overlapMinX := max(minX-halo, nMinX)
@@ -249,21 +400,15 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 			continue // No overlap
 		}
 
-		// Use the neighbor's seed to generate their core points,
-		// then filter to points in our halo region
-		neighborSeed := chunkSeed(cfg.WorldSeed, neighbor)
-		neighborPoints := GenerateBlueNoiseSeeded(neighborSeed, nMinX, nMinZ, nMaxX, nMaxZ, blueCfg)
+		// Get neighbor's points (from chunk cache, points cache, or generate + cache)
+		neighborPoints := cm.getOrGeneratePoints(neighbor)
 
-		// Filter to points within our extended bounds but outside our core
+		// Filter to points within our halo region but outside our core
 		for _, p := range neighborPoints {
 			inHalo := (p.X >= minX-halo && p.X < maxX+halo && p.Y >= minZ-halo && p.Y < maxZ+halo)
 			inCore := (p.X >= minX && p.X < maxX && p.Y >= minZ && p.Y < maxZ)
 			if inHalo && !inCore {
-				h := hashPoint(p)
-				if _, exists := seen[h]; !exists {
-					seen[h] = struct{}{}
-					allPoints = append(allPoints, p)
-				}
+				addPoint(p)
 			}
 		}
 	}
@@ -271,12 +416,221 @@ func generateChunkPoints(coord ChunkCoord, cfg ChunkConfig) []Vec2 {
 	return allPoints
 }
 
+// adjTri is an adjacency-aware triangle for the optimized Bowyer-Watson algorithm.
+// Vertices a, b, c are in CCW order.
+// n0 is the neighbor opposite vertex a (sharing edge b-c), etc.
+// -1 means no neighbor (boundary edge).
+type adjTri struct {
+	a, b, c    int  // vertex indices (CCW)
+	n0, n1, n2 int  // neighbor opposite to vertex a, b, c
+	alive      bool // false = deleted (lazy deletion)
+}
+
+// edgeKey is a canonical representation of an edge (smaller index first).
+type edgeKey struct{ a, b int }
+
+// makeEdgeKey creates a canonical edge key.
+func makeEdgeKey(a, b int) edgeKey {
+	if a > b {
+		a, b = b, a
+	}
+	return edgeKey{a, b}
+}
+
+// triEdgeRef stores a reference to a triangle and which edge slot.
+type triEdgeRef struct {
+	triIdx   int
+	edgeSlot int // 0 = edge b-c (opposite a), 1 = edge c-a (opposite b), 2 = edge a-b (opposite c)
+}
+
+// orientation2D returns positive if p is left of line a->b, negative if right, zero if collinear.
+func orientation2D(a, b, p Vec2) float64 {
+	return (b.X-a.X)*(p.Y-a.Y) - (b.Y-a.Y)*(p.X-a.X)
+}
+
+// pointInTriangle checks if point p is inside triangle (a, b, c) using orientation tests.
+// Returns true if inside or on boundary.
+func pointInTriangle(a, b, c, p Vec2) bool {
+	o1 := orientation2D(a, b, p)
+	o2 := orientation2D(b, c, p)
+	o3 := orientation2D(c, a, p)
+	// All same sign (or zero) means inside
+	return (o1 >= 0 && o2 >= 0 && o3 >= 0) || (o1 <= 0 && o2 <= 0 && o3 <= 0)
+}
+
+// WalkStats tracks walking performance metrics for debugging.
+type WalkStats struct {
+	TotalWalks     int
+	TotalSteps     int
+	MaxSteps       int
+	FallbackCount  int
+	TotalBadTris   int
+}
+
+// Global stats for debugging (reset before each Triangulate call)
+var walkStats WalkStats
+
+// walkToPoint finds a triangle containing point p using adjacency walking.
+// Returns the index of a triangle whose circumcircle contains p (a "bad" triangle).
+// startTri should be a valid, alive triangle index.
+func walkToPoint(triangles []adjTri, pts []Vec2, startTri int, p Vec2) int {
+	current := startTri
+	maxSteps := len(triangles) + 100 // Safety limit
+	stepsTaken := 0
+
+	for step := 0; step < maxSteps; step++ {
+		stepsTaken = step
+		t := triangles[current]
+		if !t.alive {
+			// Find next alive triangle
+			for i := 0; i < len(triangles); i++ {
+				if triangles[i].alive {
+					current = i
+					break
+				}
+			}
+			continue
+		}
+
+		a, b, c := pts[t.a], pts[t.b], pts[t.c]
+
+		// Check if point is inside this triangle
+		if pointInTriangle(a, b, c, p) {
+			walkStats.TotalWalks++
+			walkStats.TotalSteps += stepsTaken
+			if stepsTaken > walkStats.MaxSteps {
+				walkStats.MaxSteps = stepsTaken
+			}
+			return current
+		}
+
+		// Find which edge to cross - walk toward p
+		// Check each edge and cross if p is on the other side
+		o0 := orientation2D(b, c, p) // Edge opposite to a
+		o1 := orientation2D(c, a, p) // Edge opposite to b
+		o2 := orientation2D(a, b, p) // Edge opposite to c
+
+		// Determine triangle winding to know which direction is "outside"
+		triOrient := orientation2D(a, b, c)
+
+		// Cross the edge where p is on the opposite side
+		if triOrient > 0 {
+			// CCW triangle: negative orientation means p is outside that edge
+			if o0 < 0 && t.n0 >= 0 && triangles[t.n0].alive {
+				current = t.n0
+				continue
+			}
+			if o1 < 0 && t.n1 >= 0 && triangles[t.n1].alive {
+				current = t.n1
+				continue
+			}
+			if o2 < 0 && t.n2 >= 0 && triangles[t.n2].alive {
+				current = t.n2
+				continue
+			}
+		} else {
+			// CW triangle: positive orientation means p is outside that edge
+			if o0 > 0 && t.n0 >= 0 && triangles[t.n0].alive {
+				current = t.n0
+				continue
+			}
+			if o1 > 0 && t.n1 >= 0 && triangles[t.n1].alive {
+				current = t.n1
+				continue
+			}
+			if o2 > 0 && t.n2 >= 0 && triangles[t.n2].alive {
+				current = t.n2
+				continue
+			}
+		}
+
+		// No valid neighbor to cross to - this triangle is our best bet
+		walkStats.TotalWalks++
+		walkStats.TotalSteps += stepsTaken
+		if stepsTaken > walkStats.MaxSteps {
+			walkStats.MaxSteps = stepsTaken
+		}
+		return current
+	}
+
+	// Hit max steps - should rarely happen
+	walkStats.TotalWalks++
+	walkStats.TotalSteps += maxSteps
+	if maxSteps > walkStats.MaxSteps {
+		walkStats.MaxSteps = maxSteps
+	}
+	return current
+}
+
+// floodFillBadTris finds all triangles whose circumcircles contain point p,
+// starting from a known bad triangle and flooding via adjacency.
+func floodFillBadTris(triangles []adjTri, pts []Vec2, startTri int, p Vec2) []int {
+	badTris := make([]int, 0, 8)
+	visited := make(map[int]bool, 16)
+
+	var flood func(ti int)
+	flood = func(ti int) {
+		if ti < 0 || visited[ti] {
+			return
+		}
+		visited[ti] = true
+
+		t := triangles[ti]
+		if !t.alive {
+			return
+		}
+
+		if inCircumcircle(pts[t.a], pts[t.b], pts[t.c], p) {
+			badTris = append(badTris, ti)
+			// Flood to neighbors
+			flood(t.n0)
+			flood(t.n1)
+			flood(t.n2)
+		}
+	}
+
+	flood(startTri)
+	return badTris
+}
+
+// getTriEdges returns the three edges of a triangle with their edge slots.
+// Edge slot 0 = b-c (opposite a), 1 = c-a (opposite b), 2 = a-b (opposite c)
+func getTriEdges(t adjTri) [3]struct {
+	key  edgeKey
+	slot int
+} {
+	return [3]struct {
+		key  edgeKey
+		slot int
+	}{
+		{makeEdgeKey(t.b, t.c), 0},
+		{makeEdgeKey(t.c, t.a), 1},
+		{makeEdgeKey(t.a, t.b), 2},
+	}
+}
+
+// getNeighborSlot returns a pointer to the neighbor slot for a given edge slot.
+func getNeighborSlot(t *adjTri, slot int) *int {
+	switch slot {
+	case 0:
+		return &t.n0
+	case 1:
+		return &t.n1
+	case 2:
+		return &t.n2
+	}
+	return nil
+}
+
 // Triangulate performs Delaunay triangulation on a set of 2D points.
-// This is a simple implementation using the Bowyer-Watson algorithm.
+// Uses the Bowyer-Watson algorithm with walking point location for O(n√n) complexity.
 func Triangulate(points []Vec2) []Triangle {
 	if len(points) < 3 {
 		return nil
 	}
+
+	// Reset walk stats for this triangulation
+	walkStats = WalkStats{}
 
 	// Find bounding box
 	minX, maxX := points[0].X, points[0].X
@@ -320,72 +674,180 @@ func Triangulate(points []Vec2) []Triangle {
 
 	superI := [3]int{len(points), len(points) + 1, len(points) + 2}
 
-	// Triangle type for the algorithm
-	type tri struct {
-		a, b, c int
+	// Initialize triangles with adjacency
+	triangles := make([]adjTri, 1, len(points)*2+1)
+	triangles[0] = adjTri{
+		a: superI[0], b: superI[1], c: superI[2],
+		n0: -1, n1: -1, n2: -1,
+		alive: true,
 	}
 
-	triangles := []tri{{superI[0], superI[1], superI[2]}}
+	// Edge-to-triangle map for O(1) adjacency lookups
+	edgeToTri := make(map[edgeKey]triEdgeRef, len(points)*3)
+
+	// Register initial triangle's edges
+	for _, e := range getTriEdges(triangles[0]) {
+		edgeToTri[e.key] = triEdgeRef{triIdx: 0, edgeSlot: e.slot}
+	}
+
+	// Track a known alive triangle for walking start point
+	lastInsertedTri := 0
 
 	// Insert points one at a time
 	for pi := 0; pi < len(points); pi++ {
 		p := allPts[pi]
 
-		// Find triangles whose circumcircle contains p
-		badTris := make([]int, 0)
-		for ti, t := range triangles {
-			if inCircumcircle(allPts[t.a], allPts[t.b], allPts[t.c], p) {
-				badTris = append(badTris, ti)
+		// Walk to find a triangle containing p
+		startTri := walkToPoint(triangles, allPts, lastInsertedTri, p)
+
+		// Flood-fill to find all bad triangles
+		badTris := floodFillBadTris(triangles, allPts, startTri, p)
+
+		if len(badTris) == 0 {
+			// Fallback: linear scan (shouldn't happen normally)
+			walkStats.FallbackCount++
+			for ti := range triangles {
+				t := triangles[ti]
+				if t.alive && inCircumcircle(allPts[t.a], allPts[t.b], allPts[t.c], p) {
+					badTris = append(badTris, ti)
+				}
 			}
 		}
 
-		// Find the boundary polygon of the bad triangles
-		type edge struct{ a, b int }
-		edgeCount := make(map[edge]int)
+		walkStats.TotalBadTris += len(badTris)
+
+		// Find boundary polygon edges (edges that appear exactly once)
+		type polyEdge struct {
+			a, b     int // Original edge direction for new triangle winding
+			neighbor int // The triangle on the other side (outside the cavity)
+		}
+		edgeCount := make(map[edgeKey]int, len(badTris)*3)
+		edgeInfo := make(map[edgeKey]polyEdge, len(badTris)*3)
+
 		for _, ti := range badTris {
 			t := triangles[ti]
-			edges := []edge{{t.a, t.b}, {t.b, t.c}, {t.c, t.a}}
+			// Edge 0: b-c, neighbor n0
+			// Edge 1: c-a, neighbor n1
+			// Edge 2: a-b, neighbor n2
+			edges := []struct {
+				a, b     int
+				neighbor int
+			}{
+				{t.b, t.c, t.n0},
+				{t.c, t.a, t.n1},
+				{t.a, t.b, t.n2},
+			}
+
 			for _, e := range edges {
-				// Normalize edge direction for counting
-				if e.a > e.b {
-					e.a, e.b = e.b, e.a
-				}
-				edgeCount[e]++
+				key := makeEdgeKey(e.a, e.b)
+				edgeCount[key]++
+				edgeInfo[key] = polyEdge{a: e.a, b: e.b, neighbor: e.neighbor}
 			}
 		}
 
-		// Polygon edges are those that appear exactly once
-		polygon := make([]edge, 0)
+		// Remove edges from edgeToTri for bad triangles
 		for _, ti := range badTris {
 			t := triangles[ti]
-			edges := []edge{{t.a, t.b}, {t.b, t.c}, {t.c, t.a}}
-			for _, e := range edges {
-				ne := e
-				if ne.a > ne.b {
-					ne.a, ne.b = ne.b, ne.a
-				}
-				if edgeCount[ne] == 1 {
-					polygon = append(polygon, e)
-				}
+			for _, e := range getTriEdges(t) {
+				delete(edgeToTri, e.key)
 			}
+			// Mark as dead
+			triangles[ti].alive = false
 		}
 
-		// Remove bad triangles (in reverse order to preserve indices)
-		for i := len(badTris) - 1; i >= 0; i-- {
-			ti := badTris[i]
-			triangles[ti] = triangles[len(triangles)-1]
-			triangles = triangles[:len(triangles)-1]
+		// Collect boundary edges (those appearing exactly once)
+		polygon := make([]polyEdge, 0, len(badTris)+2)
+		for key, count := range edgeCount {
+			if count == 1 {
+				polygon = append(polygon, edgeInfo[key])
+			}
 		}
 
 		// Create new triangles from polygon edges to the new point
+		newTriIndices := make([]int, 0, len(polygon))
 		for _, e := range polygon {
-			triangles = append(triangles, tri{e.a, e.b, pi})
+			newTri := adjTri{
+				a: e.a, b: e.b, c: pi,
+				n0: -1, n1: -1, n2: e.neighbor, // n2 is opposite vertex c, which is edge a-b
+				alive: true,
+			}
+
+			triIdx := len(triangles)
+			triangles = append(triangles, newTri)
+			newTriIndices = append(newTriIndices, triIdx)
+
+			// Update the neighbor's adjacency to point back to us
+			if e.neighbor >= 0 && triangles[e.neighbor].alive {
+				neighborTri := &triangles[e.neighbor]
+				edgeKeyAB := makeEdgeKey(e.a, e.b)
+				// Find which edge slot in neighbor matches this edge
+				for _, ne := range getTriEdges(*neighborTri) {
+					if ne.key == edgeKeyAB {
+						*getNeighborSlot(neighborTri, ne.slot) = triIdx
+						break
+					}
+				}
+			}
+
+			// Register edges in edgeToTri
+			for _, edge := range getTriEdges(newTri) {
+				edgeToTri[edge.key] = triEdgeRef{triIdx: triIdx, edgeSlot: edge.slot}
+			}
+		}
+
+		// Link new triangles to each other via shared edges
+		for i, ti := range newTriIndices {
+			t := &triangles[ti]
+			// Edge 0: b-c (opposite a) -> b is polygon edge's a, c is pi
+			// Edge 1: c-a (opposite b) -> c is pi, a is polygon edge's a
+			// These edges are shared with other new triangles
+
+			// Edge with pi as one vertex - find sibling triangle sharing this edge
+			// Edge 0: vertices b, c (where c = pi)
+			key0 := makeEdgeKey(t.b, t.c)
+			// Edge 1: vertices c, a (where c = pi)
+			key1 := makeEdgeKey(t.c, t.a)
+
+			for j, tj := range newTriIndices {
+				if i == j {
+					continue
+				}
+				ot := &triangles[tj]
+				// Check if they share edge 0
+				if t.n0 < 0 {
+					for _, oe := range getTriEdges(*ot) {
+						if oe.key == key0 {
+							t.n0 = tj
+							*getNeighborSlot(ot, oe.slot) = ti
+							break
+						}
+					}
+				}
+				// Check if they share edge 1
+				if t.n1 < 0 {
+					for _, oe := range getTriEdges(*ot) {
+						if oe.key == key1 {
+							t.n1 = tj
+							*getNeighborSlot(ot, oe.slot) = ti
+							break
+						}
+					}
+				}
+			}
+		}
+
+		// Update walking start point
+		if len(newTriIndices) > 0 {
+			lastInsertedTri = newTriIndices[0]
 		}
 	}
 
-	// Remove triangles that share vertices with the super-triangle
+	// Collect final triangles (excluding super-triangle vertices)
 	result := make([]Triangle, 0, len(triangles))
 	for _, t := range triangles {
+		if !t.alive {
+			continue
+		}
 		usesSuperVertex := false
 		for _, si := range superI {
 			if t.a == si || t.b == si || t.c == si {
@@ -397,6 +859,14 @@ func Triangulate(points []Vec2) []Triangle {
 			// Ensure CCW winding
 			result = append(result, ensureCCW(allPts, t.a, t.b, t.c))
 		}
+	}
+
+	// Log walking stats for performance validation
+	if walkStats.TotalWalks > 0 {
+		avgSteps := float64(walkStats.TotalSteps) / float64(walkStats.TotalWalks)
+		avgBadTris := float64(walkStats.TotalBadTris) / float64(walkStats.TotalWalks)
+		fmt.Printf("[Triangulate] n=%d: walks=%d, avgSteps=%.2f, maxSteps=%d, fallbacks=%d, avgBadTris=%.2f\n",
+			len(points), walkStats.TotalWalks, avgSteps, walkStats.MaxSteps, walkStats.FallbackCount, avgBadTris)
 	}
 
 	return result

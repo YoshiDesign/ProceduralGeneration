@@ -50,7 +50,7 @@ func FractalNoise(x, z float64, octaves int, persistence, lacunarity float64) fl
 func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	cfg := ChunkConfig{
 		ChunkSize:    128.0,
-		MinPointDist: 12.0,
+		MinPointDist: 8.0,
 		HaloWidth:    12.0,
 		WorldSeed:    12345,
 	}
@@ -70,8 +70,8 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 
 	// Generate a 3x2 grid of chunks using the manager (benefits from caching)
 	chunks := make([]*TerrainChunk, 0, 6)
-	for cz := 0; cz < 2; cz++ {
-		for cx := 0; cx < 3; cx++ {
+	for cz := 0; cz < 1; cz++ {
+		for cx := 0; cx < 2; cx++ {
 			coord := ChunkCoord{X: cx, Z: cz}
 			chunk, err := manager.GetOrGenerate(coord)
 			if err != nil {
@@ -82,7 +82,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	}
  
 	// Scale to fit screen
-	totalWorldSize := cfg.ChunkSize * 2
+	totalWorldSize := cfg.ChunkSize * 4
 	scale := float64(min(screenW, screenH)) / totalWorldSize * 0.9
 
 	return &DualsDemo{

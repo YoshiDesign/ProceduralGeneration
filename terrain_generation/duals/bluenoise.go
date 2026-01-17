@@ -32,6 +32,7 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 		cfg.MaxTries = 30
 	}
 
+	// TODO: Aren't maxX/Z and minX/Z constants in this implementation?
 	width := maxX - minX
 	height := maxZ - minZ
 	if width <= 0 || height <= 0 {

@@ -1,4 +1,4 @@
-package duals2
+package duals
 
 import "math"
 
