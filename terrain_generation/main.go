@@ -4,7 +4,7 @@ import (
 	"log"
 	"math/rand"
 	"procedural_generation/terrain_generation/config"
-	"procedural_generation/terrain_generation/duals"
+	"procedural_generation/terrain_generation/duals2"
 	"procedural_generation/terrain_generation/hexa"
 	"time"
 
@@ -25,7 +25,7 @@ type App struct {
 	autoRun  bool
 	accum    float64
 	hexa     hexa.HexaModule
-	duals    *duals.DualsDemo
+	duals    *duals2.DualsDemo
 	viewMode ViewMode
 }
 
@@ -38,7 +38,7 @@ func NewApp() *App {
 	hexa_ := hexa.HexaModule{}
 	hexa_.Init()
 
-	dualsDemo := duals.NewDualsDemo(screenW, screenH)
+	dualsDemo := duals2.NewDualsDemo(screenW, screenH)
 
 	return &App{
 		rng:      rng,

@@ -1,4 +1,4 @@
-package duals
+package duals2
 
 import (
 	"fmt"
@@ -18,17 +18,37 @@ type ChunkManager struct {
 	cache       map[ChunkCoord]*TerrainChunk
 	pointsCache map[ChunkCoord][]Vec2 // Raw blue noise points (before full chunk is built)
 	cfg         ChunkConfig
-	heightFunc  func(x, z float64) float64
+	heightFunc   func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64
+
+	// Hydrology system
+	hydro *HydroManager
 }
 
 // NewChunkManager creates a new chunk manager with the given configuration.
-func NewChunkManager(cfg ChunkConfig, heightFunc func(x, z float64) float64) *ChunkManager {
+func NewChunkManager(cfg ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
 	return &ChunkManager{
 		cache:       make(map[ChunkCoord]*TerrainChunk),
 		pointsCache: make(map[ChunkCoord][]Vec2),
 		cfg:         cfg,
 		heightFunc:  heightFunc,
+		hydro:       NewHydroManager(DefaultHydroConfig(), cfg.WorldSeed),
 	}
+}
+
+// NewChunkManagerWithHydro creates a chunk manager with custom hydrology configuration.
+func NewChunkManagerWithHydro(cfg ChunkConfig, hydroCfg HydroConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
+	return &ChunkManager{
+		cache:       make(map[ChunkCoord]*TerrainChunk),
+		pointsCache: make(map[ChunkCoord][]Vec2),
+		cfg:         cfg,
+		heightFunc:  heightFunc,
+		hydro:       NewHydroManager(hydroCfg, cfg.WorldSeed),
+	}
+}
+
+// HydroManager returns the hydrology manager for advanced hydrology operations.
+func (cm *ChunkManager) HydroManager() *HydroManager {
+	return cm.hydro
 }
 
 // GetOrGenerate returns a cached chunk or generates and caches a new one.
@@ -188,6 +208,9 @@ type TerrainChunk struct {
 
 	// Which sites are in the core region (not halo)
 	CoreSiteIndices []int
+
+	// Hydrology data
+	Hydro *ChunkHydroData
 }
 
 // chunkSeed computes a deterministic seed for a chunk based on world seed and coordinates.
@@ -269,7 +292,7 @@ func boundarySeed(worldSeed int64, coord1, coord2 ChunkCoord) int64 {
 // GenerateChunk creates a terrain chunk with Delaunay mesh, heights, and spatial index.
 // The heightFunc provides elevation for each site position.
 // This version does not use caching - for cached generation, use ChunkManager.
-func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float64) float64) (*TerrainChunk, error) {
+func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) (*TerrainChunk, error) {
 	// Create a temporary ChunkManager for standalone generation (no caching benefit)
 	tempManager := NewChunkManager(cfg, heightFunc)
 	return tempManager.generateChunkInternal(coord)
@@ -305,7 +328,7 @@ func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, 
 	for i, p := range allPoints {
 		h := 0.0
 		if cm.heightFunc != nil {
-			h = cm.heightFunc(p.X, p.Y) // p.Y is Z in 2D
+			h = cm.heightFunc(p.X, p.Y, 6, 0.01, 3.0, 0.2, 2.0) // p.Y is Z in 2D, amplitude scaled for terrain heights
 		}
 		sites[i] = Site{Pos: p, Height: h}
 		heights[i] = h
@@ -321,7 +344,7 @@ func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, 
 	chunk.Mesh = mesh
 
 	// Compute face normals
-	chunk.FaceNormals = computeAllFaceNormals(mesh, heights)
+	chunk.FaceNormals = mesh.AllFaceNormals(heights)
 
 	// Build spatial index
 	// Cell size roughly equal to minimum point distance for good performance
@@ -329,17 +352,131 @@ func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, 
 		chunk.MinX-cm.cfg.HaloWidth, chunk.MinZ-cm.cfg.HaloWidth,
 		chunk.MaxX+cm.cfg.HaloWidth, chunk.MaxZ+cm.cfg.HaloWidth)
 
+	// Generate hydrology data
+	chunk.Hydro = cm.generateChunkHydrology(chunk)
+
 	return chunk, nil
+}
+
+// generateChunkHydrology computes rivers, lakes, and ocean data for a chunk.
+func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroData {
+	hydro := &ChunkHydroData{
+		Rivers:       make([]RiverSegment, 0),
+		Lakes:        make([]Lake, 0),
+		RiverEntries: make([]RiverExitPoint, 0),
+		RiverExits:   make([]RiverExitPoint, 0),
+	}
+
+	bounds := struct{ MinX, MinZ, MaxX, MaxZ float64 }{
+		chunk.MinX, chunk.MinZ, chunk.MaxX, chunk.MaxZ,
+	}
+
+	// 1. Process incoming rivers from neighbors
+	entries := cm.hydro.GetRiverEntries(chunk.Coord)
+	for _, entry := range entries {
+		hydro.RiverEntries = append(hydro.RiverEntries, entry)
+
+		// Find the nearest site to the entry point
+		nearestSite := cm.findNearestSite(chunk.Mesh, entry.Position)
+		if nearestSite < 0 {
+			continue
+		}
+
+		// Continue tracing the river
+		segment, exit := cm.hydro.TraceRiver(
+			chunk.Mesh, chunk.Heights, nearestSite, bounds,
+			entry.Width, entry.Depth, entry.Distance,
+		)
+
+		if len(segment.Vertices) > 0 {
+			hydro.Rivers = append(hydro.Rivers, segment)
+		}
+
+		if exit != nil {
+			exit.RiverID = entry.RiverID
+			hydro.RiverExits = append(hydro.RiverExits, *exit)
+			cm.hydro.RegisterRiverExit(chunk.Coord, *exit)
+		}
+	}
+	cm.hydro.ClearRiverEntries(chunk.Coord)
+
+	// 2. Find new river sources in this chunk
+	sources := cm.hydro.FindRiverSources(chunk.Mesh, chunk.Heights, chunk.CoreSiteIndices)
+	for _, source := range sources {
+		segment, exit := cm.hydro.TraceRiver(
+			chunk.Mesh, chunk.Heights, source, bounds,
+			cm.hydro.cfg.RiverWidthBase, cm.hydro.cfg.RiverDepthBase, 0,
+		)
+
+		if len(segment.Vertices) > 0 {
+			hydro.Rivers = append(hydro.Rivers, segment)
+		}
+
+		if exit != nil {
+			exit.RiverID = cm.hydro.nextRiverID
+			cm.hydro.nextRiverID++
+			hydro.RiverExits = append(hydro.RiverExits, *exit)
+			cm.hydro.RegisterRiverExit(chunk.Coord, *exit)
+		}
+	}
+
+	// 3. Detect lakes at local minima
+	minima := cm.hydro.FindLocalMinima(chunk.Mesh, chunk.Heights)
+	for _, minimum := range minima {
+		// Check if this minimum is in the core region
+		isCore := false
+		for _, coreIdx := range chunk.CoreSiteIndices {
+			if coreIdx == minimum {
+				isCore = true
+				break
+			}
+		}
+		if !isCore {
+			continue
+		}
+
+		lake := cm.hydro.FloodFillLake(chunk.Mesh, chunk.Heights, minimum)
+		if lake != nil {
+			hydro.Lakes = append(hydro.Lakes, *lake)
+		}
+	}
+
+	// 4. Compute ocean data if this chunk is in an ocean region
+	hydro.Ocean = cm.hydro.ComputeOceanChunkData(chunk.Coord, chunk.Mesh, chunk.Heights)
+
+	return hydro
+}
+
+// findNearestSite finds the mesh site closest to a given position.
+func (cm *ChunkManager) findNearestSite(mesh *DelaunayMesh, pos Vec2) int {
+	bestDist := float64(1e18)
+	bestSite := -1
+
+	for i, site := range mesh.Sites {
+		d := site.Pos.Sub(pos).Len2()
+		if d < bestDist {
+			bestDist = d
+			bestSite = i
+		}
+	}
+
+	return bestSite
 }
 
 // generateChunkPoints generates blue noise points for a chunk including halo regions.
 // Uses the point cache to avoid redundant blue noise generation for neighbors.
 // Caller must hold a write lock on cm.mu.
 func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
+
+	
 	minX := float64(coord.X) * cm.cfg.ChunkSize
 	minZ := float64(coord.Z) * cm.cfg.ChunkSize
 	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
 	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
+
+	fmt.Printf(
+		"generateChunkPoints-------------\n ChunkSize\t%v\ncoord.X\t%v\ncoord.Z\t%v\nmin:\t(%v, %v)\nmax:(%v, %v)\n---------------\n", 
+		cm.cfg.ChunkSize, coord.X, coord.Z, minX, minZ, maxX, maxZ)
 
 	halo := cm.cfg.HaloWidth
 
@@ -650,6 +787,9 @@ func Triangulate(points []Vec2) []Triangle {
 		}
 	}
 
+	fmt.Println("MinX:", minX, "MaxX:", maxX)
+	fmt.Println("MinZ:", minZ, "MaZZ:", maxZ)
+
 	// Create super-triangle that encompasses all points
 	dx := maxX - minX
 	dz := maxZ - minZ
@@ -900,26 +1040,6 @@ func ensureCCW(pts []Vec2, a, b, c int) Triangle {
 		return Triangle{A: a, C: b, B: c} // Swap b and c
 	}
 	return Triangle{A: a, B: b, C: c}
-}
-
-// computeAllFaceNormals computes face normals for all triangles in the mesh.
-func computeAllFaceNormals(mesh *DelaunayMesh, heights []float64) []Vec3 {
-	normals := make([]Vec3, len(mesh.Tris))
-	for i, t := range mesh.Tris {
-		// Get 3D positions
-		a := Vec3{mesh.Sites[t.A].Pos.X, heights[t.A], mesh.Sites[t.A].Pos.Y}
-		b := Vec3{mesh.Sites[t.B].Pos.X, heights[t.B], mesh.Sites[t.B].Pos.Y}
-		c := Vec3{mesh.Sites[t.C].Pos.X, heights[t.C], mesh.Sites[t.C].Pos.Y}
-
-		// Two edges
-		ab := b.Sub(a)
-		ac := c.Sub(a)
-
-		// Cross product gives normal (CCW winding means this points "up")
-		n := ab.Cross(ac).Normalize()
-		normals[i] = n
-	}
-	return normals
 }
 
 // SampleHeight returns the interpolated height at position (x, z).

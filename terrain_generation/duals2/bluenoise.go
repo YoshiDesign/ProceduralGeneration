@@ -1,6 +1,7 @@
-package duals
+package duals2
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 )
@@ -32,12 +33,13 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 		cfg.MaxTries = 30
 	}
 
-	// TODO: Aren't maxX/Z and minX/Z constants in this implementation?
 	width := maxX - minX
 	height := maxZ - minZ
 	if width <= 0 || height <= 0 {
 		return nil
 	}
+
+	fmt.Printf("GenerateBlueNoise---\nmax: (%v, %v)\nmin: (%v, %v)\nwidth: %v\theight: %v ----", maxX, maxZ, minX, minZ, width, height)
 
 	// Cell size for the background grid: r / sqrt(2) guarantees at most one point per cell
 	cellSize := cfg.MinDist / math.Sqrt(2)

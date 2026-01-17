@@ -46,13 +46,13 @@ The terrain generation pipeline follows these stages:
 
 ### What is Blue Noise?
 
-Blue noise is a sampling pattern where points are randomly distributed but maintain a **minimum distance** from each other. Unlike pure random (white noise) which creates clumps and gaps, blue noise produces aesthetically pleasing, evenly-spaced distributions.
+Blue noise is a sampling pattern where points are randomly distributed but maintain a **minimum distance** from each other. Unlike pure random (white noise) which creates clumps and gaps, blue noise produces aesthetically pleasing, evenly-spaced, non-repeating distributions.
 
 ```
-White Noise (clumpy):        Blue Noise (even):
-  •    ••                      •    •    •
+White Noise (clumpy):        Blue Noise:
+  •    ••                      •    •   •
     •••    •                     •    •
-  •      ••                    •    •    •
+  •      ••                    •    •   •
       •                          •    •
 ```
 

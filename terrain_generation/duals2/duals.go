@@ -1,4 +1,4 @@
-package duals
+package duals2
 
 import (
 	"fmt"
