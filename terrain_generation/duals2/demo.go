@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
@@ -20,6 +21,10 @@ type DualsDemo struct {
 	ShowVoronoi   bool
 	ShowNormals   bool
 	ShowHydrology bool // Toggle hydrology visualization
+
+	// Debug UI for parameter tuning
+	DebugUI   *DebugUI
+	chunkCfg  ChunkConfig // Store for regeneration
 }
 
 func exampleHeightFunc(x, z float64) float64 {
@@ -61,12 +66,7 @@ func FractalNoiseV2(x, z float64, octaves int, frequency, amplitude, persistence
 
 // NewDualsDemo creates a demo with a 2x2 grid of chunks using the ChunkManager.
 func NewDualsDemo(screenW, screenH int) *DualsDemo {
-	cfg := ChunkConfig{
-		ChunkSize:    128.0,
-		MinPointDist: 8.0,
-		HaloWidth:    12.0,
-		WorldSeed:    12345,
-	}
+	cfg := DefaultChunkConfig()
 
 	// Height function: simple noise-like terrain
 	heightFunc := FractalNoiseV2
@@ -75,9 +75,9 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	manager := NewChunkManager(cfg, heightFunc)
 
 	// Generate a 3x2 grid of chunks using the manager (benefits from caching)
-	chunks := make([]*TerrainChunk, 0, 6)
-	for cz := 0; cz < 4; cz++ {
-		for cx := 0; cx < 6; cx++ {
+	chunks := make([]*TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
+	for cz := 0; cz < cfg.ChunksZ; cz++ {
+		for cx := 0; cx < cfg.ChunksX; cx++ {
 			coord := ChunkCoord{X: cx, Z: cz}
 			chunk, err := manager.GetOrGenerate(coord)
 			if err != nil {
@@ -86,12 +86,12 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 			chunks = append(chunks, chunk)
 		}
 	}
- 
+
 	// Scale to fit screen
-	totalWorldSize := cfg.ChunkSize * 4
+	totalWorldSize := cfg.ChunkSize * 3
 	scale := float64(min(screenW, screenH)) / totalWorldSize * 0.9
 
-	return &DualsDemo{
+	demo := &DualsDemo{
 		Manager:       manager,
 		Chunks:        chunks,
 		ScreenW:       screenW,
@@ -102,7 +102,20 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 		ShowVoronoi:   false,
 		ShowNormals:   false,
 		ShowHydrology: true, // Enable hydrology visualization by default
+		chunkCfg:      cfg,
 	}
+
+	// Create debug UI with regeneration callback
+	demo.DebugUI = NewDebugUI(
+		manager.NoiseParams(),
+		manager.HydroConfig(),
+		demo.regenerate,
+	)
+
+	// Pre-compute render data for all chunks
+	demo.buildAllRenderData()
+
+	return demo
 }
 
 // worldToScreen converts world coordinates to screen coordinates.
@@ -110,6 +123,289 @@ func (d *DualsDemo) worldToScreen(x, z float64) (float32, float32) {
 	sx := d.OffsetX + x*d.Scale
 	sz := d.OffsetZ + z*d.Scale
 	return float32(sx), float32(sz)
+}
+
+// buildRenderData pre-computes vertices and indices for batched triangle rendering.
+// This should be called once when chunks are generated or when view parameters change.
+func (d *DualsDemo) buildRenderData(chunk *TerrainChunk) {
+	mesh := chunk.Mesh
+	if mesh == nil {
+		chunk.RenderVertices = nil
+		chunk.RenderIndices = nil
+		return
+	}
+
+	// Build a set of core site indices for fast lookup
+	coreSet := make(map[int]struct{}, len(chunk.CoreSiteIndices))
+	for _, ci := range chunk.CoreSiteIndices {
+		coreSet[ci] = struct{}{}
+	}
+
+	// Pre-compute the light direction (same as in drawChunk)
+	light := Vec3{-0.5, 0.8, -0.3}.Normalize()
+
+	// Count core triangles first to pre-allocate
+	coreTriCount := 0
+	for _, t := range mesh.Tris {
+		_, aCore := coreSet[t.A]
+		_, bCore := coreSet[t.B]
+		_, cCore := coreSet[t.C]
+		if aCore || bCore || cCore {
+			coreTriCount++
+		}
+	}
+
+	// Pre-allocate slices (3 vertices and 3 indices per triangle)
+	vertices := make([]ebiten.Vertex, 0, coreTriCount*3)
+	indices := make([]uint16, 0, coreTriCount*3)
+
+	vertexIdx := uint16(0)
+
+	for ti, t := range mesh.Tris {
+		// Only include triangles with at least one core vertex
+		_, aCore := coreSet[t.A]
+		_, bCore := coreSet[t.B]
+		_, cCore := coreSet[t.C]
+		if !aCore && !bCore && !cCore {
+			continue
+		}
+
+		// Get world positions
+		a := mesh.Sites[t.A].Pos
+		b := mesh.Sites[t.B].Pos
+		c := mesh.Sites[t.C].Pos
+
+		// Convert to screen coordinates
+		ax, ay := d.worldToScreen(a.X, a.Y)
+		bx, by := d.worldToScreen(b.X, b.Y)
+		cx, cy := d.worldToScreen(c.X, c.Y)
+
+		// Compute color (same logic as drawChunk)
+		var r, g, b_col, alpha float32
+		if ti < len(chunk.FaceNormals) {
+			n := chunk.FaceNormals[ti]
+			intensity := n.Dot(light)
+			if intensity < 0 {
+				intensity = 0
+			}
+			intensity = 0.3 + 0.7*intensity // Ambient + diffuse
+
+			// Base color varies with average height
+			avgH := (chunk.Heights[t.A] + chunk.Heights[t.B] + chunk.Heights[t.C])
+			baseR := 80.0 + avgH*2
+			baseG := 120.0 + avgH*1.5
+			baseB := 80.0 + avgH*0.5
+
+			r = float32(clamp(baseR*intensity, 0, 255)) / 255.0
+			g = float32(clamp(baseG*intensity, 0, 255)) / 255.0
+			b_col = float32(clamp(baseB*intensity, 0, 255)) / 255.0
+			alpha = 1.0
+		} else {
+			r = 100.0 / 255.0
+			g = 140.0 / 255.0
+			b_col = 100.0 / 255.0
+			alpha = 1.0
+		}
+
+		// Add three vertices for this triangle
+		vertices = append(vertices,
+			ebiten.Vertex{DstX: ax, DstY: ay, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b_col, ColorA: alpha},
+			ebiten.Vertex{DstX: bx, DstY: by, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b_col, ColorA: alpha},
+			ebiten.Vertex{DstX: cx, DstY: cy, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b_col, ColorA: alpha},
+		)
+
+		// Add indices for this triangle
+		indices = append(indices, vertexIdx, vertexIdx+1, vertexIdx+2)
+		vertexIdx += 3
+	}
+
+	chunk.RenderVertices = vertices
+	chunk.RenderIndices = indices
+}
+
+// buildAllRenderData rebuilds render data for all chunks.
+func (d *DualsDemo) buildAllRenderData() {
+	for _, chunk := range d.Chunks {
+		d.buildRenderData(chunk)
+		d.buildHydrologyRenderData(chunk)
+	}
+}
+
+// buildHydrologyRenderData pre-computes vertices for lake and ocean triangles.
+func (d *DualsDemo) buildHydrologyRenderData(chunk *TerrainChunk) {
+	// Clear existing hydrology render data
+	chunk.LakeVertices = nil
+	chunk.LakeIndices = nil
+	chunk.OceanVertices = nil
+	chunk.OceanIndices = nil
+
+	if chunk.Hydro == nil || chunk.Mesh == nil {
+		return
+	}
+
+	// Build lake render data
+	d.buildLakeRenderData(chunk)
+
+	// Build ocean render data
+	d.buildOceanRenderData(chunk)
+}
+
+// buildLakeRenderData pre-computes vertices for all lake triangles in a chunk.
+func (d *DualsDemo) buildLakeRenderData(chunk *TerrainChunk) {
+	if len(chunk.Hydro.Lakes) == 0 {
+		return
+	}
+
+	// Lake color (same as in drawLakes)
+	r := float32(40) / 255.0
+	g := float32(140) / 255.0
+	b := float32(160) / 255.0
+	a := float32(180) / 255.0
+
+	// Collect all lake site indices across all lakes
+	allLakeSites := make(map[int]struct{})
+	for _, lake := range chunk.Hydro.Lakes {
+		for _, idx := range lake.SiteIndices {
+			allLakeSites[idx] = struct{}{}
+		}
+	}
+
+	// Count lake triangles for pre-allocation
+	lakeTriCount := 0
+	for _, tri := range chunk.Mesh.Tris {
+		_, aLake := allLakeSites[tri.A]
+		_, bLake := allLakeSites[tri.B]
+		_, cLake := allLakeSites[tri.C]
+		if aLake && bLake && cLake {
+			lakeTriCount++
+		}
+	}
+
+	if lakeTriCount == 0 {
+		return
+	}
+
+	vertices := make([]ebiten.Vertex, 0, lakeTriCount*3)
+	indices := make([]uint16, 0, lakeTriCount*3)
+	vertexIdx := uint16(0)
+
+	for _, tri := range chunk.Mesh.Tris {
+		_, aLake := allLakeSites[tri.A]
+		_, bLake := allLakeSites[tri.B]
+		_, cLake := allLakeSites[tri.C]
+		if !aLake || !bLake || !cLake {
+			continue
+		}
+
+		posA := chunk.Mesh.Sites[tri.A].Pos
+		posB := chunk.Mesh.Sites[tri.B].Pos
+		posC := chunk.Mesh.Sites[tri.C].Pos
+
+		ax, ay := d.worldToScreen(posA.X, posA.Y)
+		bx, by := d.worldToScreen(posB.X, posB.Y)
+		cx, cy := d.worldToScreen(posC.X, posC.Y)
+
+		vertices = append(vertices,
+			ebiten.Vertex{DstX: ax, DstY: ay, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b, ColorA: a},
+			ebiten.Vertex{DstX: bx, DstY: by, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b, ColorA: a},
+			ebiten.Vertex{DstX: cx, DstY: cy, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b, ColorA: a},
+		)
+		indices = append(indices, vertexIdx, vertexIdx+1, vertexIdx+2)
+		vertexIdx += 3
+	}
+
+	chunk.LakeVertices = vertices
+	chunk.LakeIndices = indices
+}
+
+// buildOceanRenderData pre-computes vertices for ocean triangles with depth-based coloring.
+func (d *DualsDemo) buildOceanRenderData(chunk *TerrainChunk) {
+	ocean := chunk.Hydro.Ocean
+	if !ocean.IsOcean || len(ocean.SubmergedTris) == 0 {
+		return
+	}
+
+	// Get sea level for depth calculation
+	oceanRegion := d.Manager.HydroManager().GetOceanForChunk(chunk.Coord)
+	seaLevel := float64(0)
+	if oceanRegion != nil {
+		seaLevel = oceanRegion.SeaLevel
+	}
+
+	vertices := make([]ebiten.Vertex, 0, len(ocean.SubmergedTris)*3)
+	indices := make([]uint16, 0, len(ocean.SubmergedTris)*3)
+	vertexIdx := uint16(0)
+
+	for _, triID := range ocean.SubmergedTris {
+		if triID < 0 || triID >= len(chunk.Mesh.Tris) {
+			continue
+		}
+
+		tri := chunk.Mesh.Tris[triID]
+		posA := chunk.Mesh.Sites[tri.A].Pos
+		posB := chunk.Mesh.Sites[tri.B].Pos
+		posC := chunk.Mesh.Sites[tri.C].Pos
+
+		ax, ay := d.worldToScreen(posA.X, posA.Y)
+		bx, by := d.worldToScreen(posB.X, posB.Y)
+		cx, cy := d.worldToScreen(posC.X, posC.Y)
+
+		// Color based on depth (same logic as drawOcean)
+		avgHeight := (chunk.Heights[tri.A] + chunk.Heights[tri.B] + chunk.Heights[tri.C]) / 3.0
+		depth := seaLevel - avgHeight
+		depthFactor := clamp(depth/20.0, 0, 1)
+
+		r := float32(30-20*depthFactor) / 255.0
+		g := float32(80-30*depthFactor) / 255.0
+		b := float32(140+40*depthFactor) / 255.0
+		a := float32(180+50*depthFactor) / 255.0
+
+		vertices = append(vertices,
+			ebiten.Vertex{DstX: ax, DstY: ay, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b, ColorA: a},
+			ebiten.Vertex{DstX: bx, DstY: by, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b, ColorA: a},
+			ebiten.Vertex{DstX: cx, DstY: cy, SrcX: 1, SrcY: 1, ColorR: r, ColorG: g, ColorB: b, ColorA: a},
+		)
+		indices = append(indices, vertexIdx, vertexIdx+1, vertexIdx+2)
+		vertexIdx += 3
+	}
+
+	chunk.OceanVertices = vertices
+	chunk.OceanIndices = indices
+}
+
+// Update handles input and updates UI state.
+func (d *DualsDemo) Update() {
+	// Toggle debug UI with D key
+	if inpututil.IsKeyJustPressed(ebiten.KeyD) {
+		d.DebugUI.Toggle()
+	}
+
+	// Update debug UI
+	d.DebugUI.Update()
+}
+
+// regenerate rebuilds all chunks with new parameters.
+func (d *DualsDemo) regenerate(noiseParams NoiseParams, hydroConfig HydroConfig) {
+	// Update manager configurations
+	d.Manager.SetNoiseParams(noiseParams)
+	d.Manager.SetHydroConfig(hydroConfig)
+	d.Manager.ClearCaches()
+
+	// Regenerate all chunks
+	d.Chunks = make([]*TerrainChunk, 0, 24)
+	for cz := 0; cz < d.Manager.cfg.ChunksZ; cz++ {
+		for cx := 0; cx < d.Manager.cfg.ChunksX; cx++ {
+			coord := ChunkCoord{X: cx, Z: cz}
+			chunk, err := d.Manager.GetOrGenerate(coord)
+			if err != nil {
+				continue
+			}
+			d.Chunks = append(d.Chunks, chunk)
+		}
+	}
+
+	// Rebuild render data for all chunks
+	d.buildAllRenderData()
 }
 
 // Draw renders the terrain chunks.
@@ -132,6 +428,9 @@ func (d *DualsDemo) Draw(screen *ebiten.Image) {
 	for _, chunk := range d.Chunks {
 		d.drawChunkBoundary(screen, chunk)
 	}
+
+	// Draw debug UI on top
+	d.DebugUI.Draw(screen)
 }
 
 // drawChunkHydrology renders all water features for a chunk.
@@ -146,80 +445,14 @@ func (d *DualsDemo) drawChunkHydrology(screen *ebiten.Image, chunk *TerrainChunk
 	d.drawRivers(screen, chunk)
 }
 
-// drawChunk renders a single terrain chunk.
+// drawChunk renders a single terrain chunk using batched DrawTriangles.
 func (d *DualsDemo) drawChunk(screen *ebiten.Image, chunk *TerrainChunk) {
-	mesh := chunk.Mesh
-	if mesh == nil {
+	if len(chunk.RenderVertices) == 0 || len(chunk.RenderIndices) == 0 {
 		return
 	}
 
-	// Draw triangles
-	for ti, t := range mesh.Tris {
-		// Only draw triangles with at least one core vertex
-		isCore := false
-		for _, ci := range chunk.CoreSiteIndices {
-			if t.A == ci || t.B == ci || t.C == ci {
-				isCore = true
-				break
-			}
-		}
-		if !isCore {
-			continue
-		}
-
-		a := mesh.Sites[t.A].Pos
-		b := mesh.Sites[t.B].Pos
-		c := mesh.Sites[t.C].Pos
-
-		ax, ay := d.worldToScreen(a.X, a.Y)
-		bx, by := d.worldToScreen(b.X, b.Y)
-		cx, cy := d.worldToScreen(c.X, c.Y)
-
-		// Color based on height (using face normal Y component for shading)
-		var triColor color.RGBA
-		if ti < len(chunk.FaceNormals) {
-			n := chunk.FaceNormals[ti]
-			// Directional lighting from upper-left
-			light := Vec3{-0.5, 0.8, -0.3}.Normalize()
-			intensity := n.Dot(light)
-			if intensity < 0 {
-				intensity = 0
-			}
-			intensity = 0.3 + 0.7*intensity // Ambient + diffuse
-
-			// Base color varies with average height
-			avgH := (chunk.Heights[t.A] + chunk.Heights[t.B] + chunk.Heights[t.C]) / 3.0
-			baseR := 80.0 + avgH*2
-			baseG := 120.0 + avgH*1.5
-			baseB := 80.0 + avgH*0.5
-
-			triColor = color.RGBA{
-				R: uint8(clamp(baseR*intensity, 0, 255)),
-				G: uint8(clamp(baseG*intensity, 0, 255)),
-				B: uint8(clamp(baseB*intensity, 0, 255)),
-				A: 255,
-			}
-		} else {
-			triColor = color.RGBA{100, 140, 100, 255}
-		}
-
-		// Fill triangle
-		drawFilledTriangle(screen, ax, ay, bx, by, cx, cy, triColor)
-
-		// Draw edges
-		// edgeColor := color.RGBA{60, 80, 60, 255}
-		// vector.StrokeLine(screen, ax, ay, bx, by, 1, edgeColor, false)
-		// vector.StrokeLine(screen, bx, by, cx, cy, 1, edgeColor, false)
-		// vector.StrokeLine(screen, cx, cy, ax, ay, 1, edgeColor, false)
-	}
-
-	// // Draw sites as small dots
-	// siteColor := color.RGBA{255, 200, 100, 255}
-	// for _, idx := range chunk.CoreSiteIndices {
-	// 	site := mesh.Sites[idx]
-	// 	sx, sy := d.worldToScreen(site.Pos.X, site.Pos.Y)
-	// 	vector.FillCircle(screen, sx, sy, 2, siteColor, false)
-	// }
+	// Single batched draw call for all triangles in this chunk
+	screen.DrawTriangles(chunk.RenderVertices, chunk.RenderIndices, emptyImage(), nil)
 }
 
 // drawChunkBoundary draws the chunk boundary.
@@ -235,30 +468,6 @@ func (d *DualsDemo) drawChunkBoundary(screen *ebiten.Image, chunk *TerrainChunk)
 	vector.StrokeLine(screen, x2, y2, x3, y3, 2, boundaryColor, false)
 	vector.StrokeLine(screen, x3, y3, x4, y4, 2, boundaryColor, false)
 	vector.StrokeLine(screen, x4, y4, x1, y1, 2, boundaryColor, false)
-}
-
-// drawFilledTriangle fills a triangle using scanline approach.
-func drawFilledTriangle(screen *ebiten.Image, x1, y1, x2, y2, x3, y3 float32, c color.RGBA) {
-	// Use Ebiten's vector package to draw a filled triangle as a path
-	var path vector.Path
-	path.MoveTo(x1, y1)
-	path.LineTo(x2, y2)
-	path.LineTo(x3, y3)
-	path.Close()
-
-	vs, is := path.AppendVerticesAndIndicesForFilling(nil, nil)
-	for i := range vs {
-		vs[i].SrcX = 1
-		vs[i].SrcY = 1
-		vs[i].ColorR = float32(c.R) / 255.0
-		vs[i].ColorG = float32(c.G) / 255.0
-		vs[i].ColorB = float32(c.B) / 255.0
-		vs[i].ColorA = float32(c.A) / 255.0
-	}
-
-	op := &ebiten.DrawTrianglesOptions{}
-	op.FillRule = ebiten.FillRuleNonZero
-	screen.DrawTriangles(vs, is, emptyImage(), op)
 }
 
 // emptyImage returns a 1x1 white image for solid color fills.
@@ -346,13 +555,18 @@ func (d *DualsDemo) drawRivers(screen *ebiten.Image, chunk *TerrainChunk) {
 	}
 }
 
-// drawLakes renders lakes as filled water areas.
+// drawLakes renders lakes as filled water areas using batched DrawTriangles.
 func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *TerrainChunk) {
 	if chunk.Hydro == nil || chunk.Mesh == nil {
 		return
 	}
 
-	lakeColor := color.RGBA{40, 140, 160, 180}
+	// Draw batched lake triangles
+	if len(chunk.LakeVertices) > 0 && len(chunk.LakeIndices) > 0 {
+		screen.DrawTriangles(chunk.LakeVertices, chunk.LakeIndices, emptyImage(), nil)
+	}
+
+	// Draw lake edges and spillways (these remain unbatched as they're less performance-critical)
 	lakeEdgeColor := color.RGBA{60, 180, 200, 200}
 
 	for _, lake := range chunk.Hydro.Lakes {
@@ -364,21 +578,6 @@ func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *TerrainChunk) {
 		lakeSites := make(map[int]bool)
 		for _, idx := range lake.SiteIndices {
 			lakeSites[idx] = true
-		}
-
-		// Find and fill triangles where all vertices are lake sites
-		for _, tri := range chunk.Mesh.Tris {
-			if lakeSites[tri.A] && lakeSites[tri.B] && lakeSites[tri.C] {
-				a := chunk.Mesh.Sites[tri.A].Pos
-				b := chunk.Mesh.Sites[tri.B].Pos
-				c := chunk.Mesh.Sites[tri.C].Pos
-
-				ax, ay := d.worldToScreen(a.X, a.Y)
-				bx, by := d.worldToScreen(b.X, b.Y)
-				cx, cy := d.worldToScreen(c.X, c.Y)
-
-				drawFilledTriangle(screen, ax, ay, bx, by, cx, cy, lakeColor)
-			}
 		}
 
 		// Draw lake outline by finding boundary edges
@@ -426,7 +625,7 @@ func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *TerrainChunk) {
 	}
 }
 
-// drawOcean renders ocean areas with submerged triangles and coastline.
+// drawOcean renders ocean areas with submerged triangles and coastline using batched DrawTriangles.
 func (d *DualsDemo) drawOcean(screen *ebiten.Image, chunk *TerrainChunk) {
 	if chunk.Hydro == nil || chunk.Mesh == nil {
 		return
@@ -437,44 +636,12 @@ func (d *DualsDemo) drawOcean(screen *ebiten.Image, chunk *TerrainChunk) {
 		return
 	}
 
-	// Get the ocean region for sea level
-	oceanRegion := d.Manager.HydroManager().GetOceanForChunk(chunk.Coord)
-	seaLevel := float64(0)
-	if oceanRegion != nil {
-		seaLevel = oceanRegion.SeaLevel
+	// Draw batched ocean triangles
+	if len(chunk.OceanVertices) > 0 && len(chunk.OceanIndices) > 0 {
+		screen.DrawTriangles(chunk.OceanVertices, chunk.OceanIndices, emptyImage(), nil)
 	}
 
-	// Draw submerged triangles
-	for _, triID := range ocean.SubmergedTris {
-		if triID < 0 || triID >= len(chunk.Mesh.Tris) {
-			continue
-		}
-
-		tri := chunk.Mesh.Tris[triID]
-		a := chunk.Mesh.Sites[tri.A].Pos
-		b := chunk.Mesh.Sites[tri.B].Pos
-		c := chunk.Mesh.Sites[tri.C].Pos
-
-		ax, ay := d.worldToScreen(a.X, a.Y)
-		bx, by := d.worldToScreen(b.X, b.Y)
-		cx, cy := d.worldToScreen(c.X, c.Y)
-
-		// Color based on depth (darker = deeper)
-		avgHeight := (chunk.Heights[tri.A] + chunk.Heights[tri.B] + chunk.Heights[tri.C]) / 3.0
-		depth := seaLevel - avgHeight
-		depthFactor := clamp(depth/20.0, 0, 1) // Normalize depth to 0-1
-
-		oceanColor := color.RGBA{
-			R: uint8(30 - 20*depthFactor),
-			G: uint8(80 - 30*depthFactor),
-			B: uint8(140 + 40*depthFactor),
-			A: uint8(180 + 50*depthFactor),
-		}
-
-		drawFilledTriangle(screen, ax, ay, bx, by, cx, cy, oceanColor)
-	}
-
-	// Draw coastline points
+	// Draw coastline points and lines (these remain unbatched as they're less performance-critical)
 	if len(ocean.CoastlinePts) > 0 {
 		coastColor := color.RGBA{200, 220, 255, 255}
 		for _, pt := range ocean.CoastlinePts {

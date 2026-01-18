@@ -71,6 +71,12 @@ func (a *App) Update() error {
 			a.viewMode = ViewHexa
 		}
 	}
+
+	// Update the active module
+	if a.viewMode == ViewDuals {
+		a.duals.Update()
+	}
+
 	return nil
 }
 

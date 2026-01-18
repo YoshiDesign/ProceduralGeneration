@@ -5,7 +5,29 @@ import (
 	"hash/fnv"
 	"math/rand"
 	"sync"
+
+	"github.com/hajimehoshi/ebiten/v2"
 )
+
+// NoiseParams holds configurable parameters for fractal noise terrain generation.
+type NoiseParams struct {
+	Octaves     int
+	Frequency   float64
+	Amplitude   float64
+	Persistence float64
+	Lacunarity  float64
+}
+
+// DefaultNoiseParams returns sensible defaults for terrain noise generation.
+func DefaultNoiseParams() NoiseParams {
+	return NoiseParams{
+		Octaves:     6,
+		Frequency:   0.1,
+		Amplitude:   3.0,
+		Persistence: 0.2,
+		Lacunarity:  2.0,
+	}
+}
 
 // ChunkCoord identifies a chunk by integer grid coordinates.
 type ChunkCoord struct {
@@ -18,10 +40,148 @@ type ChunkManager struct {
 	cache       map[ChunkCoord]*TerrainChunk
 	pointsCache map[ChunkCoord][]Vec2 // Raw blue noise points (before full chunk is built)
 	cfg         ChunkConfig
-	heightFunc   func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64
+	noiseParams NoiseParams
+	heightFunc  func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64
 
 	// Hydrology system
 	hydro *HydroManager
+}
+
+
+// ChunkConfig holds parameters for terrain chunk generation.
+type ChunkConfig struct {
+	ChunkSize   float64 // World units per chunk side (e.g., 256.0)
+	MinPointDist float64 // Minimum distance between blue noise points
+	HaloWidth   float64 // Boundary overlap region width (typically = MinPointDist)
+	WorldSeed   int64   // Global world seed
+	ChunksX     int     // Number of chunks along the X axis
+	ChunksZ     int     // Number of chunks along the Z axis
+}
+
+// DefaultChunkConfig returns sensible defaults for a terrain chunk.
+func DefaultChunkConfig() ChunkConfig {
+	return ChunkConfig{
+		ChunkSize:    128.0,
+		MinPointDist: 8.0,
+		HaloWidth:    8.0,
+		WorldSeed:    42,
+		ChunksX: 	  4,
+		ChunksZ: 	  3,
+	}
+}
+
+// TerrainChunk represents a generated terrain chunk with mesh data.
+type TerrainChunk struct {
+	Coord ChunkCoord
+	Cfg   ChunkConfig
+
+	// Core bounds (what this chunk "owns")
+	MinX, MinZ float64
+	MaxX, MaxZ float64
+
+	// The Delaunay mesh (includes halo points for boundary continuity)
+	Mesh *DelaunayMesh
+
+	// Height values per site (parallel to Mesh.Sites)
+	Heights []float64
+
+	// Face normals per triangle (parallel to Mesh.Tris)
+	FaceNormals []Vec3
+
+	// Spatial index for fast point location
+	Spatial *SpatialGrid
+
+	// Which sites are in the core region (not halo)
+	CoreSiteIndices []int
+
+	// Hydrology data
+	Hydro *ChunkHydroData
+
+	// Pre-computed render data for batched drawing
+	RenderVertices []ebiten.Vertex
+	RenderIndices  []uint16
+
+	// Pre-computed hydrology render data
+	LakeVertices  []ebiten.Vertex
+	LakeIndices   []uint16
+	OceanVertices []ebiten.Vertex
+	OceanIndices  []uint16
+}
+
+// chunkSeed computes a deterministic seed for a chunk based on world seed and coordinates.
+func chunkSeed(worldSeed int64, coord ChunkCoord) int64 {
+	h := fnv.New64a()
+	// Write world seed
+	buf := make([]byte, 8)
+	buf[0] = byte(worldSeed)
+	buf[1] = byte(worldSeed >> 8)
+	buf[2] = byte(worldSeed >> 16)
+	buf[3] = byte(worldSeed >> 24)
+	buf[4] = byte(worldSeed >> 32)
+	buf[5] = byte(worldSeed >> 40)
+	buf[6] = byte(worldSeed >> 48)
+	buf[7] = byte(worldSeed >> 56)
+	h.Write(buf)
+
+	// Write chunk X
+	buf[0] = byte(coord.X)
+	buf[1] = byte(coord.X >> 8)
+	buf[2] = byte(coord.X >> 16)
+	buf[3] = byte(coord.X >> 24)
+	buf[4] = 0
+	buf[5] = 0
+	buf[6] = 0
+	buf[7] = 0
+	h.Write(buf)
+
+	// Write chunk Z
+	buf[0] = byte(coord.Z)
+	buf[1] = byte(coord.Z >> 8)
+	buf[2] = byte(coord.Z >> 16)
+	buf[3] = byte(coord.Z >> 24)
+	h.Write(buf)
+
+	return int64(h.Sum64())
+}
+
+// boundarySeed computes a deterministic seed for the shared boundary between two chunks.
+// It uses the minimum of the two chunk coords to ensure both chunks get the same seed.
+func boundarySeed(worldSeed int64, coord1, coord2 ChunkCoord) int64 {
+	// Use lexicographically smaller coord first
+	var first, second ChunkCoord
+	if coord1.X < coord2.X || (coord1.X == coord2.X && coord1.Z < coord2.Z) {
+		first, second = coord1, coord2
+	} else {
+		first, second = coord2, coord1
+	}
+
+	h := fnv.New64a()
+	buf := make([]byte, 8)
+
+	// World seed
+	buf[0] = byte(worldSeed)
+	buf[1] = byte(worldSeed >> 8)
+	buf[2] = byte(worldSeed >> 16)
+	buf[3] = byte(worldSeed >> 24)
+	buf[4] = byte(worldSeed >> 32)
+	buf[5] = byte(worldSeed >> 40)
+	buf[6] = byte(worldSeed >> 48)
+	buf[7] = byte(worldSeed >> 56)
+	h.Write(buf)
+
+	// First chunk
+	buf[0] = byte(first.X)
+	buf[1] = byte(first.X >> 8)
+	buf[2] = byte(first.Z)
+	buf[3] = byte(first.Z >> 8)
+	// Second chunk
+	buf[4] = byte(second.X)
+	buf[5] = byte(second.X >> 8)
+	buf[6] = byte(second.Z)
+	buf[7] = byte(second.Z >> 8)
+	h.Write(buf)
+
+	return int64(h.Sum64())
 }
 
 // NewChunkManager creates a new chunk manager with the given configuration.
@@ -30,6 +190,7 @@ func NewChunkManager(cfg ChunkConfig, heightFunc func(x, z float64, octaves int,
 		cache:       make(map[ChunkCoord]*TerrainChunk),
 		pointsCache: make(map[ChunkCoord][]Vec2),
 		cfg:         cfg,
+		noiseParams: DefaultNoiseParams(),
 		heightFunc:  heightFunc,
 		hydro:       NewHydroManager(DefaultHydroConfig(), cfg.WorldSeed),
 	}
@@ -41,6 +202,19 @@ func NewChunkManagerWithHydro(cfg ChunkConfig, hydroCfg HydroConfig, heightFunc 
 		cache:       make(map[ChunkCoord]*TerrainChunk),
 		pointsCache: make(map[ChunkCoord][]Vec2),
 		cfg:         cfg,
+		noiseParams: DefaultNoiseParams(),
+		heightFunc:  heightFunc,
+		hydro:       NewHydroManager(hydroCfg, cfg.WorldSeed),
+	}
+}
+
+// NewChunkManagerFull creates a chunk manager with all custom configurations.
+func NewChunkManagerFull(cfg ChunkConfig, noiseParams NoiseParams, hydroCfg HydroConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
+	return &ChunkManager{
+		cache:       make(map[ChunkCoord]*TerrainChunk),
+		pointsCache: make(map[ChunkCoord][]Vec2),
+		cfg:         cfg,
+		noiseParams: noiseParams,
 		heightFunc:  heightFunc,
 		hydro:       NewHydroManager(hydroCfg, cfg.WorldSeed),
 	}
@@ -49,6 +223,40 @@ func NewChunkManagerWithHydro(cfg ChunkConfig, hydroCfg HydroConfig, heightFunc 
 // HydroManager returns the hydrology manager for advanced hydrology operations.
 func (cm *ChunkManager) HydroManager() *HydroManager {
 	return cm.hydro
+}
+
+// NoiseParams returns the current noise parameters.
+func (cm *ChunkManager) NoiseParams() NoiseParams {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.noiseParams
+}
+
+// SetNoiseParams updates the noise parameters. Call ClearCaches() and regenerate chunks to apply.
+func (cm *ChunkManager) SetNoiseParams(np NoiseParams) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.noiseParams = np
+}
+
+// HydroConfig returns the current hydrology configuration.
+func (cm *ChunkManager) HydroConfig() HydroConfig {
+	return cm.hydro.cfg
+}
+
+// SetHydroConfig updates the hydrology configuration. Call ClearCaches() and regenerate chunks to apply.
+func (cm *ChunkManager) SetHydroConfig(cfg HydroConfig) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.hydro = NewHydroManager(cfg, cm.cfg.WorldSeed)
+}
+
+// ClearCaches removes all cached chunks and points, allowing regeneration with new parameters.
+func (cm *ChunkManager) ClearCaches() {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.cache = make(map[ChunkCoord]*TerrainChunk)
+	cm.pointsCache = make(map[ChunkCoord][]Vec2)
 }
 
 // GetOrGenerate returns a cached chunk or generates and caches a new one.
@@ -167,128 +375,6 @@ func (cm *ChunkManager) getOrGeneratePoints(coord ChunkCoord) []Vec2 {
 	return pts
 }
 
-// ChunkConfig holds parameters for terrain chunk generation.
-type ChunkConfig struct {
-	ChunkSize   float64 // World units per chunk side (e.g., 256.0)
-	MinPointDist float64 // Minimum distance between blue noise points
-	HaloWidth   float64 // Boundary overlap region width (typically = MinPointDist)
-	WorldSeed   int64   // Global world seed
-}
-
-// DefaultChunkConfig returns sensible defaults for a terrain chunk.
-func DefaultChunkConfig() ChunkConfig {
-	return ChunkConfig{
-		ChunkSize:    256.0,
-		MinPointDist: 8.0,
-		HaloWidth:    8.0,
-		WorldSeed:    42,
-	}
-}
-
-// TerrainChunk represents a generated terrain chunk with mesh data.
-type TerrainChunk struct {
-	Coord ChunkCoord
-	Cfg   ChunkConfig
-
-	// Core bounds (what this chunk "owns")
-	MinX, MinZ float64
-	MaxX, MaxZ float64
-
-	// The Delaunay mesh (includes halo points for boundary continuity)
-	Mesh *DelaunayMesh
-
-	// Height values per site (parallel to Mesh.Sites)
-	Heights []float64
-
-	// Face normals per triangle (parallel to Mesh.Tris)
-	FaceNormals []Vec3
-
-	// Spatial index for fast point location
-	Spatial *SpatialGrid
-
-	// Which sites are in the core region (not halo)
-	CoreSiteIndices []int
-
-	// Hydrology data
-	Hydro *ChunkHydroData
-}
-
-// chunkSeed computes a deterministic seed for a chunk based on world seed and coordinates.
-func chunkSeed(worldSeed int64, coord ChunkCoord) int64 {
-	h := fnv.New64a()
-	// Write world seed
-	buf := make([]byte, 8)
-	buf[0] = byte(worldSeed)
-	buf[1] = byte(worldSeed >> 8)
-	buf[2] = byte(worldSeed >> 16)
-	buf[3] = byte(worldSeed >> 24)
-	buf[4] = byte(worldSeed >> 32)
-	buf[5] = byte(worldSeed >> 40)
-	buf[6] = byte(worldSeed >> 48)
-	buf[7] = byte(worldSeed >> 56)
-	h.Write(buf)
-
-	// Write chunk X
-	buf[0] = byte(coord.X)
-	buf[1] = byte(coord.X >> 8)
-	buf[2] = byte(coord.X >> 16)
-	buf[3] = byte(coord.X >> 24)
-	buf[4] = 0
-	buf[5] = 0
-	buf[6] = 0
-	buf[7] = 0
-	h.Write(buf)
-
-	// Write chunk Z
-	buf[0] = byte(coord.Z)
-	buf[1] = byte(coord.Z >> 8)
-	buf[2] = byte(coord.Z >> 16)
-	buf[3] = byte(coord.Z >> 24)
-	h.Write(buf)
-
-	return int64(h.Sum64())
-}
-
-// boundarySeed computes a deterministic seed for the shared boundary between two chunks.
-// It uses the minimum of the two chunk coords to ensure both chunks get the same seed.
-func boundarySeed(worldSeed int64, coord1, coord2 ChunkCoord) int64 {
-	// Use lexicographically smaller coord first
-	var first, second ChunkCoord
-	if coord1.X < coord2.X || (coord1.X == coord2.X && coord1.Z < coord2.Z) {
-		first, second = coord1, coord2
-	} else {
-		first, second = coord2, coord1
-	}
-
-	h := fnv.New64a()
-	buf := make([]byte, 8)
-
-	// World seed
-	buf[0] = byte(worldSeed)
-	buf[1] = byte(worldSeed >> 8)
-	buf[2] = byte(worldSeed >> 16)
-	buf[3] = byte(worldSeed >> 24)
-	buf[4] = byte(worldSeed >> 32)
-	buf[5] = byte(worldSeed >> 40)
-	buf[6] = byte(worldSeed >> 48)
-	buf[7] = byte(worldSeed >> 56)
-	h.Write(buf)
-
-	// First chunk
-	buf[0] = byte(first.X)
-	buf[1] = byte(first.X >> 8)
-	buf[2] = byte(first.Z)
-	buf[3] = byte(first.Z >> 8)
-	// Second chunk
-	buf[4] = byte(second.X)
-	buf[5] = byte(second.X >> 8)
-	buf[6] = byte(second.Z)
-	buf[7] = byte(second.Z >> 8)
-	h.Write(buf)
-
-	return int64(h.Sum64())
-}
-
 // GenerateChunk creates a terrain chunk with Delaunay mesh, heights, and spatial index.
 // The heightFunc provides elevation for each site position.
 // This version does not use caching - for cached generation, use ChunkManager.
@@ -325,10 +411,11 @@ func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, 
 	// Build sites with heights
 	sites := make([]Site, len(allPoints))
 	heights := make([]float64, len(allPoints))
+	np := cm.noiseParams
 	for i, p := range allPoints {
 		h := 0.0
 		if cm.heightFunc != nil {
-			h = cm.heightFunc(p.X, p.Y, 6, 0.01, 3.0, 0.2, 2.0) // p.Y is Z in 2D, amplitude scaled for terrain heights
+			h = cm.heightFunc(p.X, p.Y, np.Octaves, np.Frequency, np.Amplitude, np.Persistence, np.Lacunarity)
 		}
 		sites[i] = Site{Pos: p, Height: h}
 		heights[i] = h
