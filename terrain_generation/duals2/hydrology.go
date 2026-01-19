@@ -1,6 +1,7 @@
 package duals2
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 )
@@ -92,6 +93,7 @@ type HydroConfig struct {
 	RiverDepthBase      float64 // Starting depth at source
 	RiverDepthGrowth    float64 // Depth increase per unit distance traveled
 	RiverSourceMinElev  float64 // Minimum elevation for river sources
+	RiverSourceMaxElev  float64 // TODO Maximum elevation for river sources
 	RiverSourceProbability float64 // Probability a valid source spawns a river (0-1)
 
 	// Lake parameters
@@ -137,15 +139,16 @@ func DefaultHydroConfig() HydroConfig {
 // North of equator (Z > EquatorZ): bias toward south (negative Z).
 // South of equator (Z < EquatorZ): bias toward north (positive Z).
 func (cfg *HydroConfig) FlowBias(worldZ float64) Vec2 {
+
 	if worldZ > cfg.EquatorZ {
 		return Vec2{0, -1} // Flow south
 	}
 	return Vec2{0, 1} // Flow north
 }
 
-// RiverExitPoint stores information about a river exiting a chunk boundary.
+// RiverInterPoint stores information about a river when transitioning through a chunk boundary.
 // This enables cross-chunk river continuity.
-type RiverExitPoint struct {
+type RiverInterPoint struct {
 	Position    Vec2    // World position at chunk boundary
 	Width       float64 // River width at exit
 	Depth       float64 // River depth at exit
@@ -162,8 +165,8 @@ type ChunkHydroData struct {
 	Ocean  OceanChunkData
 
 	// Cross-chunk coordination
-	RiverEntries []RiverExitPoint // Rivers entering from neighbors
-	RiverExits   []RiverExitPoint // Rivers exiting to neighbors
+	RiverEntries []RiverInterPoint // Rivers entering from neighbors
+	RiverExits   []RiverInterPoint // Rivers exiting to neighbors
 }
 
 // HydroManager manages hydrology across all chunks.
@@ -178,11 +181,15 @@ type HydroManager struct {
 
 	// Cross-chunk river propagation
 	// Key: destination ChunkCoord, Value: rivers entering that chunk
-	riverPropagation map[ChunkCoord][]RiverExitPoint
+	riverPropagation map[ChunkCoord][]RiverInterPoint
 
 	// Ocean region ownership
 	// Key: ChunkCoord, Value: OceanID (-1 if not ocean)
 	oceanChunks map[ChunkCoord]int
+
+	// Tracks visited sites during river tracing within a chunk.
+	// Reset before processing each chunk's hydrology.
+	visitedSites map[int]bool
 
 	// ID counters
 	nextRiverID int
@@ -197,9 +204,20 @@ func NewHydroManager(cfg HydroConfig, seed int64) *HydroManager {
 		rng:              rand.New(rand.NewSource(seed)),
 		Rivers:           make(map[int]*River),
 		Lakes:            make(map[int]*Lake),
-		riverPropagation: make(map[ChunkCoord][]RiverExitPoint),
+		riverPropagation: make(map[ChunkCoord][]RiverInterPoint),
 		oceanChunks:      make(map[ChunkCoord]int),
+		visitedSites:     make(map[int]bool),
 	}
+}
+
+// ResetVisitedSites clears the visited sites map for a new chunk's hydrology pass.
+func (hm *HydroManager) ResetVisitedSites() {
+	hm.visitedSites = make(map[int]bool)
+}
+
+// IsSourceVisited returns true if the given site has already been visited by a river trace.
+func (hm *HydroManager) IsSourceVisited(site int) bool {
+	return hm.visitedSites != nil && hm.visitedSites[site]
 }
 
 // -------------------------------------------------------------------
@@ -211,10 +229,10 @@ func NewHydroManager(cfg HydroConfig, seed int64) *HydroManager {
 func (hm *HydroManager) TraceRiver(
 	mesh *DelaunayMesh,
 	heights []float64,
-	startSite int,
+	startSite int,	// source - A Site/vertex
 	chunkBounds struct{ MinX, MinZ, MaxX, MaxZ float64 },
 	initialWidth, initialDepth, distanceTraveled float64,
-) (RiverSegment, *RiverExitPoint) {
+) (RiverSegment, *RiverInterPoint) {
 
 	segment := RiverSegment{
 		Vertices: make([]Vec2, 0, 64),
@@ -229,13 +247,16 @@ func (hm *HydroManager) TraceRiver(
 	depth := initialDepth
 
 	var flowDirAccum Vec2
-	var exitPoint *RiverExitPoint
+	var exitPoint *RiverInterPoint
 
 	for iterations := 0; iterations < 10000; iterations++ {
 		if visited[current] {
 			break // Cycle detected, stop
 		}
 		visited[current] = true
+		if hm.visitedSites != nil {
+			hm.visitedSites[current] = true
+		}
 
 		pos := mesh.Sites[current].Pos
 		h := heights[current]
@@ -261,7 +282,7 @@ func (hm *HydroManager) TraceRiver(
 				exitEdge = 3
 			}
 
-			exitPoint = &RiverExitPoint{
+			exitPoint = &RiverInterPoint{
 				Position: pos,
 				Width:    width,
 				Depth:    depth,
@@ -351,6 +372,8 @@ func (hm *HydroManager) getLowerNeighbors(mesh *DelaunayMesh, heights []float64,
 
 // selectNextVertex chooses the next vertex for river flow.
 // Prefers steeper slopes but applies flow bias for tie-breaking.
+// TODO: This wont matter. Vulkan can carve f*cking valleys.
+//		 Don't bias based on slope. This will be for the tectonics layer in the near future.
 func (hm *HydroManager) selectNextVertex(
 	mesh *DelaunayMesh,
 	heights []float64,
@@ -396,6 +419,215 @@ func (hm *HydroManager) selectNextVertex(
 	}
 
 	return bestCandidate
+}
+
+func (hm *HydroManager) TraceRiverV2(
+	mesh *DelaunayMesh,
+	heights []float64,
+	startSite int,	// source - A Site/vertex
+	chunkBounds struct{ MinX, MinZ, MaxX, MaxZ float64 },
+	initialWidth, initialDepth, distanceTraveled float64,
+) (RiverSegment, *RiverInterPoint) {
+
+	segment := RiverSegment{
+		Vertices: make([]Vec2, 0, 64),
+		Widths:   make([]float64, 0, 64),
+		Depths:   make([]float64, 0, 64),
+	}
+
+	current := startSite
+	visited := make(map[int]bool)
+	distance := distanceTraveled
+	width := initialWidth
+	depth := initialDepth
+
+	var flowDirAccum Vec2
+	var exitPoint *RiverInterPoint
+
+	// Note: Iterations is an arbitrary limit
+	for iterations := 0; iterations < 10000; iterations++ {
+		if visited[current] {
+			break // Cycle detected, stop
+		}
+		visited[current] = true
+		if hm.visitedSites != nil {
+			hm.visitedSites[current] = true
+		}
+
+		pos := mesh.Sites[current].Pos
+		// h := heights[current]
+
+		// Note: First iteration records vertex unless already visited somehow
+		// Record vertex
+		segment.Vertices = append(segment.Vertices, pos)
+		segment.Widths = append(segment.Widths, width)
+		segment.Depths = append(segment.Depths, depth)
+
+		// Check if we've exited chunk bounds
+		if pos.X < chunkBounds.MinX || pos.X >= chunkBounds.MaxX ||
+			pos.Y < chunkBounds.MinZ || pos.Y >= chunkBounds.MaxZ {
+
+			// Determine exit edge
+			exitEdge := 0
+			if pos.X < chunkBounds.MinX {
+				exitEdge = 0
+			} else if pos.X >= chunkBounds.MaxX {
+				exitEdge = 1
+			} else if pos.Y < chunkBounds.MinZ {
+				exitEdge = 2
+			} else {
+				exitEdge = 3
+			}
+
+			exitPoint = &RiverInterPoint{
+				Position: pos,
+				Width:    width,
+				Depth:    depth,
+				FlowDir:  flowDirAccum.Normalize(),
+				Distance: distance,
+				ExitEdge: exitEdge,
+			}
+			break
+		}
+
+		bias := hm.cfg.FlowBias(pos.Y) // pos.Y is Z in world space
+
+		// Find neighbors with lower elevation
+		neighbors := hm.getFlowBiasedNeighbors(mesh, current, bias)
+		if len(neighbors) == 0 {
+			// Local minimum - potential lake site
+			break
+		}
+
+		// Select the next segment vertex (Site Index)
+		next := hm.selectNextVertexV2(mesh, current, neighbors, bias)
+
+		// Calculate step
+		nextPos := mesh.Sites[next].Pos
+		stepVec := nextPos.Sub(pos)
+		stepDist := stepVec.Len()
+
+		// Accumulate flow direction
+		if stepDist > 1e-9 {
+			flowDirAccum = flowDirAccum.Add(stepVec.Mul(1.0 / stepDist))
+		}
+
+		// Update river properties
+		distance += stepDist
+		width = hm.cfg.RiverWidthBase + distance*hm.cfg.RiverWidthGrowth
+		depth = hm.cfg.RiverDepthBase + distance*hm.cfg.RiverDepthGrowth
+
+		current = next
+	}
+
+	// Compute average flow direction
+	if len(segment.Vertices) > 1 {
+		segment.FlowDir = flowDirAccum.Normalize()
+	}
+
+	return segment, exitPoint
+
+}
+
+func (hm *HydroManager) getFlowBiasedNeighbors(mesh *DelaunayMesh, site int, bias Vec2) []int {
+
+	neighbors := make([]int, 0, 8)
+
+	// Use half-edge structure to find neighbors
+	startEdge := mesh.SiteEdge[site]
+	if startEdge == -1 {
+		return neighbors
+	}
+
+	edge := startEdge
+	visited := make(map[int]bool)
+
+	currentPos := mesh.Sites[site].Pos
+
+	for {
+		if visited[edge] {
+			break
+		}
+		visited[edge] = true
+
+		// Get destination of this edge (Site index)
+		dest := mesh.HalfEdges[edge].EdgeDest
+		
+		// Calculate the destination based on similarity to the flow bias
+		destPos := mesh.Sites[dest].Pos
+		destVec := destPos.Sub(currentPos)
+		destDist := destVec.Len()
+		if destDist < 1e-9 {
+			continue
+		}
+		destDir := destVec.Mul(1.0 / destDist)
+		biasAlignment := destDir.Dot(bias) // -1 to 1
+
+		// Aligned (enough) with our flow bias
+		if biasAlignment > 0.1 {
+			neighbors = append(neighbors, dest)
+		}
+
+		// Move to next edge around the vertex
+		twin := mesh.HalfEdges[edge].Twin
+		if twin == -1 {
+			break
+		}
+		edge = mesh.HalfEdges[twin].Next
+		if edge == startEdge {
+			break
+		}
+	}
+
+	return neighbors
+
+}
+
+// Prefer the vertex most aligned with the flow bias
+// NOTE: This will ignore slope, implying the vertex shader will reduce height to the selected vertex-Y, creating a valley.
+func (hm *HydroManager) selectNextVertexV2(
+	mesh *DelaunayMesh,
+	current int,
+	candidates []int,
+	bias Vec2,
+) int {
+
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	currentPos := mesh.Sites[current].Pos
+	bestScore := math.Inf(-1)
+	bestCandidate := candidates[0]
+
+	for _, c := range candidates {
+		pos := mesh.Sites[c].Pos
+
+		// Too close to constitute a river segment, I guess!
+		dist := pos.Sub(currentPos).Len()
+		if dist < 1e-9 {
+			continue
+		}
+
+		// Calculate alignment with flow bias
+		dir := pos.Sub(currentPos).Mul(1.0 / dist)
+		biasAlignment := dir.Dot(bias) // -1 to 1
+
+		// If we weight by slope we can cut mountains in half... make this a config. TODO
+
+		score := biasAlignment*0.5
+
+		// Add small random noise for meandering (±5%)
+		score *= 1.0 + (hm.rng.Float64()-0.5)*0.1
+
+		if score > bestScore {
+			bestScore = score
+			bestCandidate = c
+		}
+	}
+
+	return bestCandidate
+
 }
 
 // -------------------------------------------------------------------
@@ -706,7 +938,7 @@ func (hm *HydroManager) ComputeOceanChunkData(
 // -------------------------------------------------------------------
 
 // RegisterRiverExit records a river exiting a chunk for propagation.
-func (hm *HydroManager) RegisterRiverExit(fromChunk ChunkCoord, exit RiverExitPoint) {
+func (hm *HydroManager) RegisterRiverExit(fromChunk ChunkCoord, exit RiverInterPoint) {
 	// Determine destination chunk based on exit edge
 	var destChunk ChunkCoord
 	switch exit.ExitEdge {
@@ -724,7 +956,7 @@ func (hm *HydroManager) RegisterRiverExit(fromChunk ChunkCoord, exit RiverExitPo
 }
 
 // GetRiverEntries returns rivers that should enter this chunk from neighbors.
-func (hm *HydroManager) GetRiverEntries(chunk ChunkCoord) []RiverExitPoint {
+func (hm *HydroManager) GetRiverEntries(chunk ChunkCoord) []RiverInterPoint {
 	return hm.riverPropagation[chunk]
 }
 
@@ -738,6 +970,8 @@ func (hm *HydroManager) ClearRiverEntries(chunk ChunkCoord) {
 // -------------------------------------------------------------------
 
 // FindRiverSources identifies potential river sources in a chunk.
+// Sources are considered at each Site (a triangle vertex)
+// TODO: Consider the circumcenter that we're already plotting for the Voronoi diagram
 // Sources are high-elevation vertices that pass the probability check.
 func (hm *HydroManager) FindRiverSources(
 	mesh *DelaunayMesh,
@@ -755,6 +989,7 @@ func (hm *HydroManager) FindRiverSources(
 			continue
 		}
 
+		// TODO - This prevents sources in basins. See docs
 		// Check if this is a local maximum or near-maximum
 		// (sources shouldn't be in valleys)
 		if !hm.isNearLocalMaximum(mesh, heights, site) {
@@ -774,6 +1009,11 @@ func (hm *HydroManager) FindRiverSources(
 	return sources
 }
 
+
+/*
+	TODO: This is just one of many ways to pick a candidate. 
+	Primary traversal mechanism is our half-edge mesh. (Acceleration struct)
+*/
 // isNearLocalMaximum returns true if the site is higher than most neighbors.
 func (hm *HydroManager) isNearLocalMaximum(mesh *DelaunayMesh, heights []float64, site int) bool {
 	currentHeight := heights[site]
@@ -789,6 +1029,8 @@ func (hm *HydroManager) isNearLocalMaximum(mesh *DelaunayMesh, heights []float64
 	visited := make(map[int]bool)
 
 	for {
+
+		// On first repeat visit to an edge. Break
 		if visited[edge] {
 			break
 		}
@@ -800,8 +1042,10 @@ func (hm *HydroManager) isNearLocalMaximum(mesh *DelaunayMesh, heights []float64
 			higherCount++
 		}
 
+		// -1 is an init index. Might imply a min/max boundary... moot
 		twin := mesh.HalfEdges[edge].Twin
 		if twin == -1 {
+			fmt.Printf("[isNearLocalMaximum] Twin is -1\nSite: %d\nEdge:\t %d\n", site, edge)
 			break
 		}
 		edge = mesh.HalfEdges[twin].Next

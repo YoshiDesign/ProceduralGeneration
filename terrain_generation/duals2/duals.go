@@ -14,6 +14,9 @@ func (a Vec2) Mul(s float64) Vec2 { return Vec2{a.X * s, a.Y * s} }
 func (a Vec2) Dot(b Vec2) float64 { return a.X*b.X + a.Y*b.Y }
 func (a Vec2) Len2() float64      { return a.Dot(a) }
 func (a Vec2) Len() float64       { return math.Sqrt(a.Len2()) }
+func (a Vec2) Eq(b Vec2) bool {
+	return a.X == b.X && a.Y == b.Y
+}
 
 // Vec3 represents a 3D point/vector (X = east, Y = up, Z = north).
 type Vec3 struct{ X, Y, Z float64 }
@@ -24,6 +27,9 @@ func (a Vec3) Mul(s float64) Vec3 { return Vec3{a.X * s, a.Y * s, a.Z * s} }
 func (a Vec3) Dot(b Vec3) float64 { return a.X*b.X + a.Y*b.Y + a.Z*b.Z }
 func (a Vec3) Len2() float64      { return a.Dot(a) }
 func (a Vec3) Len() float64       { return math.Sqrt(a.Len2()) }
+func (a Vec3) Eq(b Vec3) bool {
+	return a.X == b.X && a.Y == b.Y && a.Z == b.Z
+}
 
 func (a Vec3) Cross(b Vec3) Vec3 {
 	return Vec3{
@@ -66,7 +72,7 @@ type HalfEdge struct {
 	Tri      int // triangle index
 	Next     int // half-edge index (within triangle cycle)
 	Twin     int // opposite direction half-edge index, or -1 if boundary
-	Prev     int // (optional) convenient; set during build
+	Prev     int // (optional) convenient; set during build. Otherwise unused (currently)
 	EdgeDest int // cached dest site (optional, set during build)
 }
 

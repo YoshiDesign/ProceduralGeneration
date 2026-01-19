@@ -65,8 +65,8 @@ func DefaultChunkConfig() ChunkConfig {
 		MinPointDist: 8.0,
 		HaloWidth:    8.0,
 		WorldSeed:    42,
-		ChunksX: 	  4,
-		ChunksZ: 	  3,
+		ChunksX: 	  2,
+		ChunksZ: 	  1,
 	}
 }
 
@@ -345,7 +345,6 @@ func (cm *ChunkManager) getOrGeneratePoints(coord ChunkCoord) []Vec2 {
 
 	// Check if points are cached.
 	if pts, ok := cm.pointsCache[coord]; ok {
-		fmt.Println("Grabbing point cache...")
 		return pts
 	}
 
@@ -356,7 +355,7 @@ func (cm *ChunkManager) getOrGeneratePoints(coord ChunkCoord) []Vec2 {
 		for i, site := range chunk.Mesh.Sites {
 			points[i] = site.Pos
 		}
-		fmt.Println("Uhhhh...")
+
 		return points
 	}
 
@@ -450,27 +449,39 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 	hydro := &ChunkHydroData{
 		Rivers:       make([]RiverSegment, 0),
 		Lakes:        make([]Lake, 0),
-		RiverEntries: make([]RiverExitPoint, 0),
-		RiverExits:   make([]RiverExitPoint, 0),
+		RiverEntries: make([]RiverInterPoint, 0),
+		RiverExits:   make([]RiverInterPoint, 0),
 	}
 
+	// Print a bunch of "-"
+	fmt.Println("--------------------------------")
+
+	// Bounds in world-space
 	bounds := struct{ MinX, MinZ, MaxX, MaxZ float64 }{
+		// Min = chunkSize * coord.X
+		// Max = chunkSize * (coord.X + 1)
 		chunk.MinX, chunk.MinZ, chunk.MaxX, chunk.MaxZ,
 	}
 
-	// 1. Process incoming rivers from neighbors
+	// Reset visited sites tracking for this chunk's hydrology pass
+	// cm.hydro.ResetVisitedSites()
+
+	// 1. Process incoming rivers from neighbors - Never occurs for the first chunk
 	entries := cm.hydro.GetRiverEntries(chunk.Coord)
 	for _, entry := range entries {
 		hydro.RiverEntries = append(hydro.RiverEntries, entry)
 
 		// Find the nearest site to the entry point
 		nearestSite := cm.findNearestSite(chunk.Mesh, entry.Position)
-		if nearestSite < 0 {
+
+		//fmt.Println("[ENTRY] nearestSite", nearestSite)
+		if nearestSite < 0 || cm.hydro.IsSourceVisited(nearestSite) {
+			//fmt.Println("[ENTRY] skipping visited entry", nearestSite)
 			continue
 		}
 
 		// Continue tracing the river
-		segment, exit := cm.hydro.TraceRiver(
+		segment, exit := cm.hydro.TraceRiverV2(
 			chunk.Mesh, chunk.Heights, nearestSite, bounds,
 			entry.Width, entry.Depth, entry.Distance,
 		)
@@ -490,7 +501,13 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 	// 2. Find new river sources in this chunk
 	sources := cm.hydro.FindRiverSources(chunk.Mesh, chunk.Heights, chunk.CoreSiteIndices)
 	for _, source := range sources {
-		segment, exit := cm.hydro.TraceRiver(
+		// Skip sources that overlap with already-traced river paths
+		if cm.hydro.IsSourceVisited(source) {
+			//fmt.Println("[SRC] skipping visited source", source)
+			continue
+		}
+
+		segment, exit := cm.hydro.TraceRiverV2(
 			chunk.Mesh, chunk.Heights, source, bounds,
 			cm.hydro.cfg.RiverWidthBase, cm.hydro.cfg.RiverDepthBase, 0,
 		)
@@ -505,6 +522,18 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 			hydro.RiverExits = append(hydro.RiverExits, *exit)
 			cm.hydro.RegisterRiverExit(chunk.Coord, *exit)
 		}
+	}
+
+	debug := make(map[Vec2]int)
+	for _, river := range hydro.Rivers {
+		for _, vertex := range river.Vertices {
+			debug[vertex]++
+		}
+	}
+
+	// Print results of debug
+	for x, count := range debug {
+		fmt.Printf("(%f, %f): %d\n", x.X, x.Y, count)
 	}
 
 	// 3. Detect lakes at local minima
@@ -555,15 +584,16 @@ func (cm *ChunkManager) findNearestSite(mesh *DelaunayMesh, pos Vec2) int {
 // Caller must hold a write lock on cm.mu.
 func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
 
-	
+	// ChunkCoord (0, 1)
+	// e.g. 1 * 128.0 = 128.0
 	minX := float64(coord.X) * cm.cfg.ChunkSize
 	minZ := float64(coord.Z) * cm.cfg.ChunkSize
 	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
 	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
 
-	fmt.Printf(
-		"generateChunkPoints-------------\n ChunkSize\t%v\ncoord.X\t%v\ncoord.Z\t%v\nmin:\t(%v, %v)\nmax:(%v, %v)\n---------------\n", 
-		cm.cfg.ChunkSize, coord.X, coord.Z, minX, minZ, maxX, maxZ)
+	// fmt.Printf(
+	// 	"[2] info-------------\n ChunkSize\t%v\ncoord.X\t%v\ncoord.Z\t%v\nmin:\t(%v, %v)\nmax:(%v, %v)\n---------------\n", 
+	// 	cm.cfg.ChunkSize, coord.X, coord.Z, minX, minZ, maxX, maxZ)
 
 	halo := cm.cfg.HaloWidth
 
@@ -577,6 +607,8 @@ func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
 		scale := 2.0 / cm.cfg.MinPointDist
 		qx := int64(p.X * scale)
 		qz := int64(p.Y * scale)
+
+		// Create a bitmask for this point
 		return uint64(qx)<<32 | uint64(qz)&0xFFFFFFFF
 	}
 
@@ -600,7 +632,7 @@ func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
 	corePoints := cm.getOrGeneratePoints(coord)
 	addPoints(corePoints)
 
-	// 2. Get halo points from each neighboring chunk
+	// 2. Plot the neighboring chunk coordinates for this chunk
 	neighbors := []ChunkCoord{
 		{coord.X - 1, coord.Z - 1}, {coord.X, coord.Z - 1}, {coord.X + 1, coord.Z - 1},
 		{coord.X - 1, coord.Z}, {coord.X + 1, coord.Z},
@@ -874,8 +906,8 @@ func Triangulate(points []Vec2) []Triangle {
 		}
 	}
 
-	fmt.Println("MinX:", minX, "MaxX:", maxX)
-	fmt.Println("MinZ:", minZ, "MaZZ:", maxZ)
+	// fmt.Println("MinX:", minX, "MaxX:", maxX)
+	// fmt.Println("MinZ:", minZ, "MaZZ:", maxZ)
 
 	// Create super-triangle that encompasses all points
 	dx := maxX - minX
@@ -1088,13 +1120,13 @@ func Triangulate(points []Vec2) []Triangle {
 		}
 	}
 
-	// Log walking stats for performance validation
-	if walkStats.TotalWalks > 0 {
-		avgSteps := float64(walkStats.TotalSteps) / float64(walkStats.TotalWalks)
-		avgBadTris := float64(walkStats.TotalBadTris) / float64(walkStats.TotalWalks)
-		fmt.Printf("[Triangulate] n=%d: walks=%d, avgSteps=%.2f, maxSteps=%d, fallbacks=%d, avgBadTris=%.2f\n",
-			len(points), walkStats.TotalWalks, avgSteps, walkStats.MaxSteps, walkStats.FallbackCount, avgBadTris)
-	}
+	// // Log walking stats for performance validation
+	// if walkStats.TotalWalks > 0 {
+	// 	avgSteps := float64(walkStats.TotalSteps) / float64(walkStats.TotalWalks)
+	// 	avgBadTris := float64(walkStats.TotalBadTris) / float64(walkStats.TotalWalks)
+	// 	fmt.Printf("[Triangulate] n=%d: walks=%d, avgSteps=%.2f, maxSteps=%d, fallbacks=%d, avgBadTris=%.2f\n",
+	// 		len(points), walkStats.TotalWalks, avgSteps, walkStats.MaxSteps, walkStats.FallbackCount, avgBadTris)
+	// }
 
 	return result
 }

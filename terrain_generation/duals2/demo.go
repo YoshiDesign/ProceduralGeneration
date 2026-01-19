@@ -74,7 +74,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	// Create chunk manager with caching
 	manager := NewChunkManager(cfg, heightFunc)
 
-	// Generate a 3x2 grid of chunks using the manager (benefits from caching)
+	// Generate a X,Z grid of chunks using the manager (benefits from caching)
 	chunks := make([]*TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
 	for cz := 0; cz < cfg.ChunksZ; cz++ {
 		for cx := 0; cx < cfg.ChunksX; cx++ {
@@ -88,8 +88,8 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	}
 
 	// Scale to fit screen
-	totalWorldSize := cfg.ChunkSize * 3
-	scale := float64(min(screenW, screenH)) / totalWorldSize * 0.9
+	totalWorldSize := cfg.ChunkSize * 1.2
+	scale := float64(min(screenW, screenH)) / totalWorldSize // * 0.9
 
 	demo := &DualsDemo{
 		Manager:       manager,
@@ -502,7 +502,7 @@ func (d *DualsDemo) drawRivers(screen *ebiten.Image, chunk *TerrainChunk) {
 	}
 
 	for _, segment := range chunk.Hydro.Rivers {
-		if len(segment.Vertices) < 2 {
+		if len(segment.Vertices) < 2 { // TODO: at this point, this shouldn't be possible
 			continue
 		}
 
@@ -549,7 +549,7 @@ func (d *DualsDemo) drawRivers(screen *ebiten.Image, chunk *TerrainChunk) {
 		if len(segment.Vertices) > 0 {
 			src := segment.Vertices[0]
 			sx, sy := d.worldToScreen(src.X, src.Y)
-			sourceColor := color.RGBA{150, 200, 255, 200}
+			sourceColor := color.RGBA{255, 0, 255, 200}
 			vector.FillCircle(screen, sx, sy, 3, sourceColor, false)
 		}
 	}
