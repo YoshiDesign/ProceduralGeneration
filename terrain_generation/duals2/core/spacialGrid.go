@@ -2,6 +2,19 @@ package core
 
 import "math"
 
+// SpatialGrid provides O(1) point location for height queries on a Delaunay mesh.
+type SpatialGrid struct {
+	Mesh     *DelaunayMesh
+	Heights  []float64
+	CellSize float64
+	MinX, MinZ float64
+	MaxX, MaxZ float64
+	GridW, GridH int
+
+	// Each cell stores a list of triangle indices that overlap it
+	Cells [][]int
+}
+
 // LocateTriangle finds the triangle containing point (x, z).
 // Returns (triangleIndex, ok) where ok=false if the point is outside all triangles.
 func (sg *SpatialGrid) LocateTriangle(x, z float64) (int, bool) {
@@ -35,24 +48,11 @@ func (sg *SpatialGrid) LocateTriangle(x, z float64) (int, bool) {
 
 // pointInTriangle tests if point p is inside triangle ti using barycentric coordinates.
 func (sg *SpatialGrid) pointInTriangle(ti int, p Vec2) bool {
-	t := sg.Mesh.Tris[ti]
-	a := sg.Mesh.Sites[t.A].Pos
-	b := sg.Mesh.Sites[t.B].Pos
-	c := sg.Mesh.Sites[t.C].Pos
 
-	// Barycentric test
-	v0 := b.Sub(a)
-	v1 := c.Sub(a)
-	v2 := p.Sub(a)
-
-	denom := cross2(v0, v1)
-	if math.Abs(denom) < 1e-12 {
-		return false // Degenerate triangle
+	wa, wb, wc, ok := sg.Mesh.Barycentric(ti, p)
+	if !ok {
+		return false
 	}
-
-	wb := cross2(v2, v1) / denom
-	wc := cross2(v0, v2) / denom
-	wa := 1.0 - wb - wc
 
 	// Point is inside if all weights are non-negative (with small epsilon for edge cases)
 	const eps = -1e-9

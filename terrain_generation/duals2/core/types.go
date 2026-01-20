@@ -4,19 +4,6 @@ import (
 	"math"
 )
 
-// SpatialGrid provides O(1) point location for height queries on a Delaunay mesh.
-type SpatialGrid struct {
-	Mesh     *DelaunayMesh
-	Heights  []float64
-	CellSize float64
-	MinX, MinZ float64
-	MaxX, MaxZ float64
-	GridW, GridH int
-
-	// Each cell stores a list of triangle indices that overlap it
-	Cells [][]int
-}
-
 // NoiseParams holds configurable parameters for fractal noise terrain generation.
 type NoiseParams struct {
 	Octaves     int

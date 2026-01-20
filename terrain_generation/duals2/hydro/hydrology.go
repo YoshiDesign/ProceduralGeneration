@@ -131,45 +131,6 @@ func (hm *HydroManager) IsSourceVisited(site int) bool {
 // River Tracing Algorithm
 // -------------------------------------------------------------------
 
-// getLowerNeighbors returns site indices of neighbors with lower elevation.
-func getLowerNeighbors(mesh *core.DelaunayMesh, cfg HydroConfig, heights []float64, site int) []int {
-	neighbors := make([]int, 0, 8)
-	currentHeight := heights[site]
-
-	// Use half-edge structure to find neighbors
-	startEdge := mesh.SiteEdge[site]
-	if startEdge == -1 {
-		return neighbors
-	}
-
-	edge := startEdge
-	visited := make(map[int]bool)
-
-	for {
-		if visited[edge] {
-			break
-		}
-		visited[edge] = true
-
-		// Get destination of this edge
-		dest := mesh.HalfEdges[edge].EdgeDest
-		if heights[dest] < currentHeight-cfg.RiverMinSlope {
-			neighbors = append(neighbors, dest)
-		}
-
-		// Move to next edge around the vertex
-		twin := mesh.HalfEdges[edge].Twin
-		if twin == -1 {
-			break
-		}
-		edge = mesh.HalfEdges[twin].Next
-		if edge == startEdge {
-			break
-		}
-	}
-
-	return neighbors
-}
 
 // selectNextVertex chooses the next vertex for river flow.
 // Prefers steeper slopes but applies flow bias for tie-breaking.
@@ -223,7 +184,7 @@ func (hm *HydroManager) selectNextVertex(
 }
 
 // Prefer the vertex most aligned with the flow bias
-// NOTE: This will ignore slope, implying the vertex shader will reduce height to the selected vertex-Y, creating a valley.
+// NOTE: V2 will ignore slope
 func (hm *HydroManager) selectNextVertexV2(
 	mesh *core.DelaunayMesh,
 	current int,
