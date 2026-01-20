@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"image/color"
+	"procedural_generation/terrain_generation/duals2/core"
+	"procedural_generation/terrain_generation/duals2/hydro"
 	"strconv"
 	"time"
 
@@ -22,11 +24,11 @@ type DebugUI struct {
 	fontFace text.Face
 
 	// Current parameter values (editable copies)
-	NoiseParams NoiseParams
-	HydroConfig HydroConfig
+	NoiseParams core.NoiseParams
+	HydroConfig hydro.HydroConfig
 
 	// Callback for regeneration
-	OnRegenerate func(NoiseParams, HydroConfig)
+	OnRegenerate func(core.NoiseParams, hydro.HydroConfig)
 
 	// Value display labels (for updating when sliders change)
 	noiseLabels map[string]*widget.Text
@@ -39,7 +41,7 @@ type DebugUI struct {
 }
 
 // NewDebugUI creates a new debug UI panel.
-func NewDebugUI(initialNoise NoiseParams, initialHydro HydroConfig, onRegenerate func(NoiseParams, HydroConfig)) *DebugUI {
+func NewDebugUI(initialNoise core.NoiseParams, initialHydro hydro.HydroConfig, onRegenerate func(core.NoiseParams, hydro.HydroConfig)) *DebugUI {
 	d := &DebugUI{
 		NoiseParams:   initialNoise,
 		HydroConfig:   initialHydro,
@@ -108,6 +110,7 @@ func (d *DebugUI) buildUI() *ebitenui.UI {
 	panelContainer.AddChild(d.createLabel("-- Hydrology --", color.RGBA{180, 180, 255, 255}))
 	panelContainer.AddChild(d.createFloatSlider("Sea Level", &d.HydroConfig.SeaLevel, -10.0, 10.0, "seaLevel"))
 	panelContainer.AddChild(d.createFloatSlider("River Src Elev", &d.HydroConfig.RiverSourceMinElev, 0.0, 20.0, "riverSrcElev"))
+	panelContainer.AddChild(d.createFloatSlider("River Max Elev", &d.HydroConfig.RiverSourceMaxElev, 0.0, 20.0, "riverMaxElev"))
 	panelContainer.AddChild(d.createFloatSlider("River Prob", &d.HydroConfig.RiverSourceProbability, 0.0, 1.0, "riverProb"))
 	panelContainer.AddChild(d.createFloatSlider("Lake Prob", &d.HydroConfig.LakeProbability, 0.0, 1.0, "lakeProb"))
 	panelContainer.AddChild(d.createFloatSlider("Ocean Prob", &d.HydroConfig.OceanProbability, 0.0, 1.0, "oceanProb"))

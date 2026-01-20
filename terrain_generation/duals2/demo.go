@@ -3,6 +3,8 @@ package duals2
 import (
 	"image/color"
 	"math"
+	"procedural_generation/terrain_generation/duals2/core"
+	"procedural_generation/terrain_generation/duals2/hydro"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -78,7 +80,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	chunks := make([]*TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
 	for cz := 0; cz < cfg.ChunksZ; cz++ {
 		for cx := 0; cx < cfg.ChunksX; cx++ {
-			coord := ChunkCoord{X: cx, Z: cz}
+			coord := core.ChunkCoord{X: cx, Z: cz}
 			chunk, err := manager.GetOrGenerate(coord)
 			if err != nil {
 				continue
@@ -142,7 +144,7 @@ func (d *DualsDemo) buildRenderData(chunk *TerrainChunk) {
 	}
 
 	// Pre-compute the light direction (same as in drawChunk)
-	light := Vec3{-0.5, 0.8, -0.3}.Normalize()
+	light := core.Vec3{X: -0.5, Y: 0.8, Z: -0.3}.Normalize()
 
 	// Count core triangles first to pre-allocate
 	coreTriCount := 0
@@ -385,7 +387,7 @@ func (d *DualsDemo) Update() {
 }
 
 // regenerate rebuilds all chunks with new parameters.
-func (d *DualsDemo) regenerate(noiseParams NoiseParams, hydroConfig HydroConfig) {
+func (d *DualsDemo) regenerate(noiseParams core.NoiseParams, hydroConfig hydro.HydroConfig) {
 	// Update manager configurations
 	d.Manager.SetNoiseParams(noiseParams)
 	d.Manager.SetHydroConfig(hydroConfig)
@@ -395,7 +397,7 @@ func (d *DualsDemo) regenerate(noiseParams NoiseParams, hydroConfig HydroConfig)
 	d.Chunks = make([]*TerrainChunk, 0, 24)
 	for cz := 0; cz < d.Manager.cfg.ChunksZ; cz++ {
 		for cx := 0; cx < d.Manager.cfg.ChunksX; cx++ {
-			coord := ChunkCoord{X: cx, Z: cz}
+			coord := core.ChunkCoord{X: cx, Z: cz}
 			chunk, err := d.Manager.GetOrGenerate(coord)
 			if err != nil {
 				continue
@@ -549,7 +551,7 @@ func (d *DualsDemo) drawRivers(screen *ebiten.Image, chunk *TerrainChunk) {
 		if len(segment.Vertices) > 0 {
 			src := segment.Vertices[0]
 			sx, sy := d.worldToScreen(src.X, src.Y)
-			sourceColor := color.RGBA{255, 0, 255, 200}
+			sourceColor := color.RGBA{255, 255, 255, 200}
 			vector.FillCircle(screen, sx, sy, 3, sourceColor, false)
 		}
 	}

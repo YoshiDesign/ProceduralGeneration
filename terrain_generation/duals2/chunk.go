@@ -4,49 +4,25 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand"
+	"procedural_generation/terrain_generation/duals2/core"
+	"procedural_generation/terrain_generation/duals2/hydro"
 	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// NoiseParams holds configurable parameters for fractal noise terrain generation.
-type NoiseParams struct {
-	Octaves     int
-	Frequency   float64
-	Amplitude   float64
-	Persistence float64
-	Lacunarity  float64
-}
-
-// DefaultNoiseParams returns sensible defaults for terrain noise generation.
-func DefaultNoiseParams() NoiseParams {
-	return NoiseParams{
-		Octaves:     6,
-		Frequency:   0.1,
-		Amplitude:   3.0,
-		Persistence: 0.2,
-		Lacunarity:  2.0,
-	}
-}
-
-// ChunkCoord identifies a chunk by integer grid coordinates.
-type ChunkCoord struct {
-	X, Z int
-}
-
 // ChunkManager manages chunk generation and caching for optimized neighbor lookups.
 type ChunkManager struct {
 	mu          sync.RWMutex
-	cache       map[ChunkCoord]*TerrainChunk
-	pointsCache map[ChunkCoord][]Vec2 // Raw blue noise points (before full chunk is built)
+	cache       map[core.ChunkCoord]*TerrainChunk
+	pointsCache map[core.ChunkCoord][]core.Vec2 // Raw blue noise points (before full chunk is built)
 	cfg         ChunkConfig
-	noiseParams NoiseParams
+	noiseParams core.NoiseParams
 	heightFunc  func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64
 
 	// Hydrology system
-	hydro *HydroManager
+	hydroMgr *hydro.HydroManager
 }
-
 
 // ChunkConfig holds parameters for terrain chunk generation.
 type ChunkConfig struct {
@@ -58,21 +34,9 @@ type ChunkConfig struct {
 	ChunksZ     int     // Number of chunks along the Z axis
 }
 
-// DefaultChunkConfig returns sensible defaults for a terrain chunk.
-func DefaultChunkConfig() ChunkConfig {
-	return ChunkConfig{
-		ChunkSize:    128.0,
-		MinPointDist: 8.0,
-		HaloWidth:    8.0,
-		WorldSeed:    42,
-		ChunksX: 	  2,
-		ChunksZ: 	  1,
-	}
-}
-
 // TerrainChunk represents a generated terrain chunk with mesh data.
 type TerrainChunk struct {
-	Coord ChunkCoord
+	Coord core.ChunkCoord
 	Cfg   ChunkConfig
 
 	// Core bounds (what this chunk "owns")
@@ -80,22 +44,22 @@ type TerrainChunk struct {
 	MaxX, MaxZ float64
 
 	// The Delaunay mesh (includes halo points for boundary continuity)
-	Mesh *DelaunayMesh
+	Mesh *core.DelaunayMesh
 
 	// Height values per site (parallel to Mesh.Sites)
 	Heights []float64
 
 	// Face normals per triangle (parallel to Mesh.Tris)
-	FaceNormals []Vec3
+	FaceNormals []core.Vec3
 
 	// Spatial index for fast point location
-	Spatial *SpatialGrid
+	Spatial *core.SpatialGrid
 
 	// Which sites are in the core region (not halo)
 	CoreSiteIndices []int
 
 	// Hydrology data
-	Hydro *ChunkHydroData
+	Hydro *core.ChunkHydroData
 
 	// Pre-computed render data for batched drawing
 	RenderVertices []ebiten.Vertex
@@ -108,8 +72,31 @@ type TerrainChunk struct {
 	OceanIndices  []uint16
 }
 
+
+// DefaultNoiseParams returns sensible defaults for terrain noise generation.
+func DefaultNoiseParams() core.NoiseParams {
+	return core.NoiseParams{
+		Octaves:     6,
+		Frequency:   0.1,
+		Amplitude:   3.0,
+		Persistence: 0.2,
+		Lacunarity:  2.0,
+	}
+}
+// DefaultChunkConfig returns sensible defaults for a terrain chunk.
+func DefaultChunkConfig() ChunkConfig {
+	return ChunkConfig{
+		ChunkSize:    128.0,
+		MinPointDist: 8.0,
+		HaloWidth:    8.0,
+		WorldSeed:    42,
+		ChunksX: 	  2,
+		ChunksZ: 	  1,
+	}
+}
+
 // chunkSeed computes a deterministic seed for a chunk based on world seed and coordinates.
-func chunkSeed(worldSeed int64, coord ChunkCoord) int64 {
+func chunkSeed(worldSeed int64, coord core.ChunkCoord) int64 {
 	h := fnv.New64a()
 	// Write world seed
 	buf := make([]byte, 8)
@@ -146,9 +133,9 @@ func chunkSeed(worldSeed int64, coord ChunkCoord) int64 {
 
 // boundarySeed computes a deterministic seed for the shared boundary between two chunks.
 // It uses the minimum of the two chunk coords to ensure both chunks get the same seed.
-func boundarySeed(worldSeed int64, coord1, coord2 ChunkCoord) int64 {
+func boundarySeed(worldSeed int64, coord1, coord2 core.ChunkCoord) int64 {
 	// Use lexicographically smaller coord first
-	var first, second ChunkCoord
+	var first, second core.ChunkCoord
 	if coord1.X < coord2.X || (coord1.X == coord2.X && coord1.Z < coord2.Z) {
 		first, second = coord1, coord2
 	} else {
@@ -187,81 +174,81 @@ func boundarySeed(worldSeed int64, coord1, coord2 ChunkCoord) int64 {
 // NewChunkManager creates a new chunk manager with the given configuration.
 func NewChunkManager(cfg ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
 	return &ChunkManager{
-		cache:       make(map[ChunkCoord]*TerrainChunk),
-		pointsCache: make(map[ChunkCoord][]Vec2),
+		cache:       make(map[core.ChunkCoord]*TerrainChunk),
+		pointsCache: make(map[core.ChunkCoord][]core.Vec2),
 		cfg:         cfg,
 		noiseParams: DefaultNoiseParams(),
 		heightFunc:  heightFunc,
-		hydro:       NewHydroManager(DefaultHydroConfig(), cfg.WorldSeed),
+		hydroMgr:       hydro.NewHydroManager(hydro.DefaultHydroConfig(), cfg.WorldSeed),
 	}
 }
 
 // NewChunkManagerWithHydro creates a chunk manager with custom hydrology configuration.
-func NewChunkManagerWithHydro(cfg ChunkConfig, hydroCfg HydroConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
+func NewChunkManagerWithHydro(cfg ChunkConfig, hydroCfg hydro.HydroConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
 	return &ChunkManager{
-		cache:       make(map[ChunkCoord]*TerrainChunk),
-		pointsCache: make(map[ChunkCoord][]Vec2),
+		cache:       make(map[core.ChunkCoord]*TerrainChunk),
+		pointsCache: make(map[core.ChunkCoord][]core.Vec2),
 		cfg:         cfg,
 		noiseParams: DefaultNoiseParams(),
 		heightFunc:  heightFunc,
-		hydro:       NewHydroManager(hydroCfg, cfg.WorldSeed),
+		hydroMgr:       hydro.NewHydroManager(hydroCfg, cfg.WorldSeed),
 	}
 }
 
 // NewChunkManagerFull creates a chunk manager with all custom configurations.
-func NewChunkManagerFull(cfg ChunkConfig, noiseParams NoiseParams, hydroCfg HydroConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
+func NewChunkManagerFull(cfg ChunkConfig, noiseParams core.NoiseParams, hydroCfg hydro.HydroConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
 	return &ChunkManager{
-		cache:       make(map[ChunkCoord]*TerrainChunk),
-		pointsCache: make(map[ChunkCoord][]Vec2),
+		cache:       make(map[core.ChunkCoord]*TerrainChunk),
+		pointsCache: make(map[core.ChunkCoord][]core.Vec2),
 		cfg:         cfg,
 		noiseParams: noiseParams,
 		heightFunc:  heightFunc,
-		hydro:       NewHydroManager(hydroCfg, cfg.WorldSeed),
+		hydroMgr:       hydro.NewHydroManager(hydroCfg, cfg.WorldSeed),
 	}
 }
 
 // HydroManager returns the hydrology manager for advanced hydrology operations.
-func (cm *ChunkManager) HydroManager() *HydroManager {
-	return cm.hydro
+func (cm *ChunkManager) HydroManager() *hydro.HydroManager {
+	return cm.hydroMgr
 }
 
 // NoiseParams returns the current noise parameters.
-func (cm *ChunkManager) NoiseParams() NoiseParams {
+func (cm *ChunkManager) NoiseParams() core.NoiseParams {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return cm.noiseParams
 }
 
 // SetNoiseParams updates the noise parameters. Call ClearCaches() and regenerate chunks to apply.
-func (cm *ChunkManager) SetNoiseParams(np NoiseParams) {
+func (cm *ChunkManager) SetNoiseParams(np core.NoiseParams) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	cm.noiseParams = np
 }
 
-// HydroConfig returns the current hydrology configuration.
-func (cm *ChunkManager) HydroConfig() HydroConfig {
-	return cm.hydro.cfg
+// hydro.HydroConfig returns the current hydrology configuration.
+func (cm *ChunkManager) HydroConfig() hydro.HydroConfig {
+	return cm.hydroMgr.Cfg
 }
 
-// SetHydroConfig updates the hydrology configuration. Call ClearCaches() and regenerate chunks to apply.
-func (cm *ChunkManager) SetHydroConfig(cfg HydroConfig) {
+// Sethydro.HydroConfig updates the hydrology configuration. Call ClearCaches() and regenerate chunks to apply.
+func (cm *ChunkManager) SetHydroConfig(cfg hydro.HydroConfig) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	cm.hydro = NewHydroManager(cfg, cm.cfg.WorldSeed)
+	cm.hydroMgr = hydro.NewHydroManager(cfg, cm.cfg.WorldSeed)
 }
 
 // ClearCaches removes all cached chunks and points, allowing regeneration with new parameters.
 func (cm *ChunkManager) ClearCaches() {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	cm.cache = make(map[ChunkCoord]*TerrainChunk)
-	cm.pointsCache = make(map[ChunkCoord][]Vec2)
+	cm.cache = make(map[core.ChunkCoord]*TerrainChunk)
+	cm.pointsCache = make(map[core.ChunkCoord][]core.Vec2)
 }
 
 // GetOrGenerate returns a cached chunk or generates and caches a new one.
 // This is the primary API for chunk access with caching optimization.
-func (cm *ChunkManager) GetOrGenerate(coord ChunkCoord) (*TerrainChunk, error) {
+func (cm *ChunkManager) GetOrGenerate(coord core.ChunkCoord) (*TerrainChunk, error) {
 	// Fast path: check if already cached
 	cm.mu.RLock()
 	if chunk, ok := cm.cache[coord]; ok {
@@ -289,21 +276,21 @@ func (cm *ChunkManager) GetOrGenerate(coord ChunkCoord) (*TerrainChunk, error) {
 }
 
 // Get returns a cached chunk without generating. Returns nil if not cached.
-func (cm *ChunkManager) Get(coord ChunkCoord) *TerrainChunk {
+func (cm *ChunkManager) Get(coord core.ChunkCoord) *TerrainChunk {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return cm.cache[coord]
 }
 
 // Evict removes a chunk from the cache, freeing memory.
-func (cm *ChunkManager) Evict(coord ChunkCoord) {
+func (cm *ChunkManager) Evict(coord core.ChunkCoord) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	delete(cm.cache, coord)
 }
 
 // EvictOutsideRadius removes all chunks outside the given radius from center.
-func (cm *ChunkManager) EvictOutsideRadius(center ChunkCoord, radius int) int {
+func (cm *ChunkManager) EvictOutsideRadius(center core.ChunkCoord, radius int) int {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -327,10 +314,10 @@ func (cm *ChunkManager) CacheSize() int {
 }
 
 // CachedCoords returns all cached chunk coordinates.
-func (cm *ChunkManager) CachedCoords() []ChunkCoord {
+func (cm *ChunkManager) CachedCoords() []core.ChunkCoord {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	coords := make([]ChunkCoord, 0, len(cm.cache))
+	coords := make([]core.ChunkCoord, 0, len(cm.cache))
 	for coord := range cm.cache {
 		coords = append(coords, coord)
 	}
@@ -338,10 +325,10 @@ func (cm *ChunkManager) CachedCoords() []ChunkCoord {
 }
 
 // getOrGeneratePoints returns blue noise points for a chunk, using caches when available.
-// Priority: 1) Full chunk cache (Mesh.Sites), 2) Points cache, 3) Generate new.
+// Priority: 1) Full chunk cache (Mesh.core.Sites), 2) Points cache, 3) Generate new.
 // Caller must hold at least a read lock on cm.mu.
 // If generation is needed, caller should hold a write lock.
-func (cm *ChunkManager) getOrGeneratePoints(coord ChunkCoord) []Vec2 {
+func (cm *ChunkManager) getOrGeneratePoints(coord core.ChunkCoord) []core.Vec2 {
 
 	// Check if points are cached.
 	if pts, ok := cm.pointsCache[coord]; ok {
@@ -351,7 +338,7 @@ func (cm *ChunkManager) getOrGeneratePoints(coord ChunkCoord) []Vec2 {
 	// Optional sanity check. Check the chunk directly for the points
 	// This will never happen under normal circumstances. Caching points is an invariant to generating blue noise.
 	if chunk, ok := cm.cache[coord]; ok {
-		points := make([]Vec2, len(chunk.Mesh.Sites))
+		points := make([]core.Vec2, len(chunk.Mesh.Sites))
 		for i, site := range chunk.Mesh.Sites {
 			points[i] = site.Pos
 		}
@@ -377,7 +364,7 @@ func (cm *ChunkManager) getOrGeneratePoints(coord ChunkCoord) []Vec2 {
 // GenerateChunk creates a terrain chunk with Delaunay mesh, heights, and spatial index.
 // The heightFunc provides elevation for each site position.
 // This version does not use caching - for cached generation, use ChunkManager.
-func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) (*TerrainChunk, error) {
+func GenerateChunk(coord core.ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) (*TerrainChunk, error) {
 	// Create a temporary ChunkManager for standalone generation (no caching benefit)
 	tempManager := NewChunkManager(cfg, heightFunc)
 	return tempManager.generateChunkInternal(coord)
@@ -385,7 +372,7 @@ func GenerateChunk(coord ChunkCoord, cfg ChunkConfig, heightFunc func(x, z float
 
 // generateChunkInternal creates a terrain chunk using the ChunkManager's caches.
 // Caller must hold a write lock on cm.mu.
-func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, error) {
+func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainChunk, error) {
 	chunk := &TerrainChunk{
 		Coord: coord,
 		Cfg:   cm.cfg,
@@ -408,7 +395,7 @@ func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, 
 	chunk.CoreSiteIndices = coreIndices
 
 	// Build sites with heights
-	sites := make([]Site, len(allPoints))
+	sites := make([]core.Site, len(allPoints))
 	heights := make([]float64, len(allPoints))
 	np := cm.noiseParams
 	for i, p := range allPoints {
@@ -416,7 +403,7 @@ func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, 
 		if cm.heightFunc != nil {
 			h = cm.heightFunc(p.X, p.Y, np.Octaves, np.Frequency, np.Amplitude, np.Persistence, np.Lacunarity)
 		}
-		sites[i] = Site{Pos: p, Height: h}
+		sites[i] = core.Site{Pos: p, Height: h}
 		heights[i] = h
 	}
 	chunk.Heights = heights
@@ -445,12 +432,12 @@ func (cm *ChunkManager) generateChunkInternal(coord ChunkCoord) (*TerrainChunk, 
 }
 
 // generateChunkHydrology computes rivers, lakes, and ocean data for a chunk.
-func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroData {
-	hydro := &ChunkHydroData{
-		Rivers:       make([]RiverSegment, 0),
-		Lakes:        make([]Lake, 0),
-		RiverEntries: make([]RiverInterPoint, 0),
-		RiverExits:   make([]RiverInterPoint, 0),
+func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkHydroData {
+	hydro := &core.ChunkHydroData{
+		Rivers:       make([]core.RiverSegment, 0),
+		Lakes:        make([]core.Lake, 0),
+		RiverEntries: make([]core.RiverInterPoint, 0),
+		RiverExits:   make([]core.RiverInterPoint, 0),
 	}
 
 	// Print a bunch of "-"
@@ -464,10 +451,10 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 	}
 
 	// Reset visited sites tracking for this chunk's hydrology pass
-	// cm.hydro.ResetVisitedSites()
+	// cm.hydroMgr.ResetVisitedcore.Sites()
 
 	// 1. Process incoming rivers from neighbors - Never occurs for the first chunk
-	entries := cm.hydro.GetRiverEntries(chunk.Coord)
+	entries := cm.hydroMgr.GetRiverEntries(chunk.Coord)
 	for _, entry := range entries {
 		hydro.RiverEntries = append(hydro.RiverEntries, entry)
 
@@ -475,15 +462,19 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 		nearestSite := cm.findNearestSite(chunk.Mesh, entry.Position)
 
 		//fmt.Println("[ENTRY] nearestSite", nearestSite)
-		if nearestSite < 0 || cm.hydro.IsSourceVisited(nearestSite) {
+		if nearestSite < 0 || cm.hydroMgr.IsSourceVisited(nearestSite) {
 			//fmt.Println("[ENTRY] skipping visited entry", nearestSite)
 			continue
 		}
 
 		// Continue tracing the river
-		segment, exit := cm.hydro.TraceRiverV2(
-			chunk.Mesh, chunk.Heights, nearestSite, bounds,
-			entry.Width, entry.Depth, entry.Distance,
+		segment, exit := cm.hydroMgr.TraceRiver(
+			chunk.Mesh, 
+			chunk.Heights, 
+			&cm.hydroMgr.VisitedSites, 
+			nearestSite, 
+			bounds,
+			entry.Distance,
 		)
 
 		if len(segment.Vertices) > 0 {
@@ -493,23 +484,27 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 		if exit != nil {
 			exit.RiverID = entry.RiverID
 			hydro.RiverExits = append(hydro.RiverExits, *exit)
-			cm.hydro.RegisterRiverExit(chunk.Coord, *exit)
+			cm.hydroMgr.RegisterRiverExit(chunk.Coord, *exit)
 		}
 	}
-	cm.hydro.ClearRiverEntries(chunk.Coord)
+	cm.hydroMgr.ClearRiverEntries(chunk.Coord)
 
 	// 2. Find new river sources in this chunk
-	sources := cm.hydro.FindRiverSources(chunk.Mesh, chunk.Heights, chunk.CoreSiteIndices)
+	sources := cm.hydroMgr.FindRiverSources(chunk.Mesh, chunk.Heights, chunk.CoreSiteIndices)
 	for _, source := range sources {
 		// Skip sources that overlap with already-traced river paths
-		if cm.hydro.IsSourceVisited(source) {
+		if cm.hydroMgr.IsSourceVisited(source) {
 			//fmt.Println("[SRC] skipping visited source", source)
 			continue
 		}
 
-		segment, exit := cm.hydro.TraceRiverV2(
-			chunk.Mesh, chunk.Heights, source, bounds,
-			cm.hydro.cfg.RiverWidthBase, cm.hydro.cfg.RiverDepthBase, 0,
+		segment, exit := cm.hydroMgr.TraceRiverV2(
+			chunk.Mesh, 
+			chunk.Heights, 
+			&cm.hydroMgr.VisitedSites, 
+			source, 
+			bounds,
+			 0,
 		)
 
 		if len(segment.Vertices) > 0 {
@@ -517,14 +512,14 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 		}
 
 		if exit != nil {
-			exit.RiverID = cm.hydro.nextRiverID
-			cm.hydro.nextRiverID++
+			exit.RiverID = cm.hydroMgr.NextRiverID
+			cm.hydroMgr.NextRiverID++
 			hydro.RiverExits = append(hydro.RiverExits, *exit)
-			cm.hydro.RegisterRiverExit(chunk.Coord, *exit)
+			cm.hydroMgr.RegisterRiverExit(chunk.Coord, *exit)
 		}
 	}
 
-	debug := make(map[Vec2]int)
+	debug := make(map[core.Vec2]int)
 	for _, river := range hydro.Rivers {
 		for _, vertex := range river.Vertices {
 			debug[vertex]++
@@ -537,7 +532,7 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 	}
 
 	// 3. Detect lakes at local minima
-	minima := cm.hydro.FindLocalMinima(chunk.Mesh, chunk.Heights)
+	minima := core.FindLocalMinima(chunk.Mesh, chunk.Heights)
 	for _, minimum := range minima {
 		// Check if this minimum is in the core region
 		isCore := false
@@ -551,20 +546,20 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *ChunkHydroD
 			continue
 		}
 
-		lake := cm.hydro.FloodFillLake(chunk.Mesh, chunk.Heights, minimum)
+		lake := cm.hydroMgr.FloodFillLake(chunk.Mesh, chunk.Heights, minimum)
 		if lake != nil {
 			hydro.Lakes = append(hydro.Lakes, *lake)
 		}
 	}
 
 	// 4. Compute ocean data if this chunk is in an ocean region
-	hydro.Ocean = cm.hydro.ComputeOceanChunkData(chunk.Coord, chunk.Mesh, chunk.Heights)
+	hydro.Ocean = cm.hydroMgr.ComputeOceanChunkData(chunk.Coord, chunk.Mesh, chunk.Heights)
 
 	return hydro
 }
 
 // findNearestSite finds the mesh site closest to a given position.
-func (cm *ChunkManager) findNearestSite(mesh *DelaunayMesh, pos Vec2) int {
+func (cm *ChunkManager) findNearestSite(mesh *core.DelaunayMesh, pos core.Vec2) int {
 	bestDist := float64(1e18)
 	bestSite := -1
 
@@ -582,9 +577,9 @@ func (cm *ChunkManager) findNearestSite(mesh *DelaunayMesh, pos Vec2) int {
 // generateChunkPoints generates blue noise points for a chunk including halo regions.
 // Uses the point cache to avoid redundant blue noise generation for neighbors.
 // Caller must hold a write lock on cm.mu.
-func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
+func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
 
-	// ChunkCoord (0, 1)
+	// core.ChunkCoord (0, 1)
 	// e.g. 1 * 128.0 = 128.0
 	minX := float64(coord.X) * cm.cfg.ChunkSize
 	minZ := float64(coord.Z) * cm.cfg.ChunkSize
@@ -598,11 +593,11 @@ func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
 	halo := cm.cfg.HaloWidth
 
 	// We'll collect points from multiple regions
-	allPoints := make([]Vec2, 0, 1024)
+	allPoints := make([]core.Vec2, 0, 1024)
 	seen := make(map[uint64]struct{}, 1024)
 
 	// Hash a point to detect duplicates (within tolerance)
-	hashPoint := func(p Vec2) uint64 {
+	hashPoint := func(p core.Vec2) uint64 {
 		// Quantize to half the min distance for dedup
 		scale := 2.0 / cm.cfg.MinPointDist
 		qx := int64(p.X * scale)
@@ -612,7 +607,7 @@ func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
 		return uint64(qx)<<32 | uint64(qz)&0xFFFFFFFF
 	}
 
-	addPoint := func(p Vec2) bool {
+	addPoint := func(p core.Vec2) bool {
 		h := hashPoint(p)
 		if _, exists := seen[h]; !exists {
 			seen[h] = struct{}{}
@@ -622,7 +617,7 @@ func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
 		return false
 	}
 
-	addPoints := func(pts []Vec2) {
+	addPoints := func(pts []core.Vec2) {
 		for _, p := range pts {
 			addPoint(p)
 		}
@@ -633,10 +628,10 @@ func (cm *ChunkManager) generateChunkPoints(coord ChunkCoord) []Vec2 {
 	addPoints(corePoints)
 
 	// 2. Plot the neighboring chunk coordinates for this chunk
-	neighbors := []ChunkCoord{
-		{coord.X - 1, coord.Z - 1}, {coord.X, coord.Z - 1}, {coord.X + 1, coord.Z - 1},
-		{coord.X - 1, coord.Z}, {coord.X + 1, coord.Z},
-		{coord.X - 1, coord.Z + 1}, {coord.X, coord.Z + 1}, {coord.X + 1, coord.Z + 1},
+	neighbors := []core.ChunkCoord{
+		{X: coord.X - 1, Z: coord.Z - 1}, {X: coord.X, Z: coord.Z - 1}, {X: coord.X + 1, Z: coord.Z - 1},
+		{X: coord.X - 1, Z: coord.Z}, {X: coord.X + 1, Z: coord.Z},
+		{X: coord.X - 1, Z: coord.Z + 1}, {X: coord.X, Z: coord.Z + 1}, {X: coord.X + 1, Z: coord.Z + 1},
 	}
 
 	for _, neighbor := range neighbors {
@@ -700,13 +695,13 @@ type triEdgeRef struct {
 }
 
 // orientation2D returns positive if p is left of line a->b, negative if right, zero if collinear.
-func orientation2D(a, b, p Vec2) float64 {
+func orientation2D(a, b, p core.Vec2) float64 {
 	return (b.X-a.X)*(p.Y-a.Y) - (b.Y-a.Y)*(p.X-a.X)
 }
 
 // pointInTriangle checks if point p is inside triangle (a, b, c) using orientation tests.
 // Returns true if inside or on boundary.
-func pointInTriangle(a, b, c, p Vec2) bool {
+func pointInTriangle(a, b, c, p core.Vec2) bool {
 	o1 := orientation2D(a, b, p)
 	o2 := orientation2D(b, c, p)
 	o3 := orientation2D(c, a, p)
@@ -729,7 +724,7 @@ var walkStats WalkStats
 // walkToPoint finds a triangle containing point p using adjacency walking.
 // Returns the index of a triangle whose circumcircle contains p (a "bad" triangle).
 // startTri should be a valid, alive triangle index.
-func walkToPoint(triangles []adjTri, pts []Vec2, startTri int, p Vec2) int {
+func walkToPoint(triangles []adjTri, pts []core.Vec2, startTri int, p core.Vec2) int {
 	current := startTri
 	maxSteps := len(triangles) + 100 // Safety limit
 	stepsTaken := 0
@@ -820,7 +815,7 @@ func walkToPoint(triangles []adjTri, pts []Vec2, startTri int, p Vec2) int {
 
 // floodFillBadTris finds all triangles whose circumcircles contain point p,
 // starting from a known bad triangle and flooding via adjacency.
-func floodFillBadTris(triangles []adjTri, pts []Vec2, startTri int, p Vec2) []int {
+func floodFillBadTris(triangles []adjTri, pts []core.Vec2, startTri int, p core.Vec2) []int {
 	badTris := make([]int, 0, 8)
 	visited := make(map[int]bool, 16)
 
@@ -880,7 +875,7 @@ func getNeighborSlot(t *adjTri, slot int) *int {
 
 // Triangulate performs Delaunay triangulation on a set of 2D points.
 // Uses the Bowyer-Watson algorithm with walking point location for O(n√n) complexity.
-func Triangulate(points []Vec2) []Triangle {
+func Triangulate(points []core.Vec2) []core.Triangle {
 	if len(points) < 3 {
 		return nil
 	}
@@ -920,12 +915,12 @@ func Triangulate(points []Vec2) []Triangle {
 	midZ := (minZ + maxZ) / 2
 
 	// Super-triangle vertices (large enough to contain all points)
-	superA := Vec2{midX - 20*deltaMax, midZ - deltaMax}
-	superB := Vec2{midX, midZ + 20*deltaMax}
-	superC := Vec2{midX + 20*deltaMax, midZ - deltaMax}
+	superA := core.Vec2{X: midX - 20*deltaMax, Y: midZ - deltaMax}
+	superB := core.Vec2{X: midX, Y: midZ + 20*deltaMax}
+	superC := core.Vec2{X: midX + 20*deltaMax, Y: midZ - deltaMax}
 
 	// Working list of points including super-triangle
-	allPts := make([]Vec2, len(points)+3)
+	allPts := make([]core.Vec2, len(points)+3)
 	copy(allPts, points)
 	allPts[len(points)] = superA
 	allPts[len(points)+1] = superB
@@ -1102,7 +1097,7 @@ func Triangulate(points []Vec2) []Triangle {
 	}
 
 	// Collect final triangles (excluding super-triangle vertices)
-	result := make([]Triangle, 0, len(triangles))
+	result := make([]core.Triangle, 0, len(triangles))
 	for _, t := range triangles {
 		if !t.alive {
 			continue
@@ -1132,7 +1127,7 @@ func Triangulate(points []Vec2) []Triangle {
 }
 
 // inCircumcircle returns true if point p is inside the circumcircle of triangle (a, b, c).
-func inCircumcircle(a, b, c, p Vec2) bool {
+func inCircumcircle(a, b, c, p core.Vec2) bool {
 	// Using the determinant method
 	ax, ay := a.X-p.X, a.Y-p.Y
 	bx, by := b.X-p.X, b.Y-p.Y
@@ -1152,13 +1147,13 @@ func inCircumcircle(a, b, c, p Vec2) bool {
 }
 
 // ensureCCW returns a Triangle with vertices in counter-clockwise order.
-func ensureCCW(pts []Vec2, a, b, c int) Triangle {
+func ensureCCW(pts []core.Vec2, a, b, c int) core.Triangle {
 	// Cross product of (b-a) × (c-a)
 	cross := (pts[b].X-pts[a].X)*(pts[c].Y-pts[a].Y) - (pts[c].X-pts[a].X)*(pts[b].Y-pts[a].Y)
 	if cross < 0 {
-		return Triangle{A: a, C: b, B: c} // Swap b and c
+		return core.Triangle{A: a, C: b, B: c} // Swap b and c
 	}
-	return Triangle{A: a, B: b, C: c}
+	return core.Triangle{A: a, B: b, C: c}
 }
 
 // SampleHeight returns the interpolated height at position (x, z).
@@ -1171,7 +1166,7 @@ func (c *TerrainChunk) SampleHeight(x, z float64) (float64, bool) {
 }
 
 // Helper: seeded RNG for boundary regions
-func boundaryRNG(worldSeed int64, coord1, coord2 ChunkCoord) *rand.Rand {
+func boundaryRNG(worldSeed int64, coord1, coord2 core.ChunkCoord) *rand.Rand {
 	seed := boundarySeed(worldSeed, coord1, coord2)
 	return rand.New(rand.NewSource(seed))
 }

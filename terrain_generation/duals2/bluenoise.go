@@ -3,6 +3,7 @@ package duals2
 import (
 	"math"
 	"math/rand"
+	"procedural_generation/terrain_generation/duals2/core"
 )
 
 // BlueNoiseConfig configures Poisson disk sampling.
@@ -23,8 +24,8 @@ func DefaultBlueNoiseConfig(minDist float64) BlueNoiseConfig {
 // using Bridson's algorithm. The region spans [minX, maxX) × [minZ, maxZ).
 //
 // rng is a seeded random source for determinism.
-// Returns a slice of Vec2 points.
-func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueNoiseConfig) []Vec2 {
+// Returns a slice of core.Vec2 points.
+func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueNoiseConfig) []core.Vec2 {
 	if cfg.MinDist <= 0 {
 		return nil
 	}
@@ -51,11 +52,11 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 		grid[i] = -1
 	}
 
-	points := make([]Vec2, 0, gridW*gridH/4)
+	points := make([]core.Vec2, 0, gridW*gridH/4)
 	active := make([]int, 0, 128)
 
 	// Helper: convert world coords to grid cell
-	toGrid := func(p Vec2) (int, int) {
+	toGrid := func(p core.Vec2) (int, int) {
 		gx := int((p.X - minX) / cellSize)
 		gz := int((p.Y - minZ) / cellSize)
 		// Clamp to valid range
@@ -75,7 +76,7 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 	}
 
 	// Helper: check if point is valid (in bounds and far enough from neighbors)
-	isValid := func(p Vec2) bool {
+	isValid := func(p core.Vec2) bool {
 		if p.X < minX || p.X >= maxX || p.Y < minZ || p.Y >= maxZ {
 			return false
 		}
@@ -102,7 +103,7 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 	}
 
 	// Insert a point
-	insert := func(p Vec2) {
+	insert := func(p core.Vec2) {
 		idx := len(points)
 		points = append(points, p)
 		active = append(active, idx)
@@ -113,7 +114,7 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 	// Start with a random initial point
 	startX := minX + rng.Float64()*width
 	startZ := minZ + rng.Float64()*height
-	insert(Vec2{startX, startZ})
+	insert(core.Vec2{X: startX, Y: startZ})
 
 	// Main loop
 	for len(active) > 0 {
@@ -127,9 +128,9 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 			// Generate a random point in the annulus [r, 2r] around p
 			angle := rng.Float64() * 2 * math.Pi
 			dist := cfg.MinDist + rng.Float64()*cfg.MinDist
-			candidate := Vec2{
-				p.X + dist*math.Cos(angle),
-				p.Y + dist*math.Sin(angle),
+			candidate := core.Vec2{
+				X: p.X + dist*math.Cos(angle),
+				Y: p.Y + dist*math.Sin(angle),
 			}
 
 			if isValid(candidate) {
@@ -150,7 +151,7 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 }
 
 // GenerateBlueNoiseSeeded is a convenience wrapper that creates a seeded RNG.
-func GenerateBlueNoiseSeeded(seed int64, minX, minZ, maxX, maxZ float64, cfg BlueNoiseConfig) []Vec2 {
+func GenerateBlueNoiseSeeded(seed int64, minX, minZ, maxX, maxZ float64, cfg BlueNoiseConfig) []core.Vec2 {
 	rng := rand.New(rand.NewSource(seed))
 	return GenerateBlueNoise(rng, minX, minZ, maxX, maxZ, cfg)
 }
