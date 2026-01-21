@@ -73,7 +73,7 @@ func (sg *SpatialGrid) SampleHeight(x, z float64) (float64, bool) {
 	b := sg.Mesh.Sites[t.B].Pos
 	c := sg.Mesh.Sites[t.C].Pos
 
-	// Compute barycentric weights
+	// Compute barycentric weights - Using `a` as our fixed point
 	v0 := b.Sub(a)
 	v1 := c.Sub(a)
 	v2 := p.Sub(a)
@@ -83,15 +83,16 @@ func (sg *SpatialGrid) SampleHeight(x, z float64) (float64, bool) {
 		return 0, false
 	}
 
-	wb := cross2(v2, v1) / denom
-	wc := cross2(v0, v2) / denom
-	wa := 1.0 - wb - wc
+	wb := cross2(v2, v1) / denom // Area of triangle APC / area of ABC
+	wc := cross2(v0, v2) / denom // Area of triangle ABP / area of ABC
+	wa := 1.0 - wb - wc			 // Whatever remains
 
-	// Interpolate height
+	// Discreet samples
 	ha := sg.Heights[t.A]
 	hb := sg.Heights[t.B]
 	hc := sg.Heights[t.C]
 
+	// Interpolated heights
 	return wa*ha + wb*hb + wc*hc, true
 }
 

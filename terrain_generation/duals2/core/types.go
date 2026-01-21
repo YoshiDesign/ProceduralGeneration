@@ -95,9 +95,9 @@ type HalfEdge struct {
 // DelaunayMesh holds topology + geometry.
 // It’s “Delaunay” if the triangles were produced by a Delaunay triangulation.
 type DelaunayMesh struct {
-	Sites     []Site
-	Tris      []Triangle
-	HalfEdges []HalfEdge
+	Sites     []Site	// Vertices
+	Tris      []Triangle // Faces
+	HalfEdges []HalfEdge // Edges
 
 	// For each triangle, index of its first half-edge (3 consecutive edges)
 	TriEdge0 []int

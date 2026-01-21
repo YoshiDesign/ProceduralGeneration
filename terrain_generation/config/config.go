@@ -3,9 +3,9 @@ package config
 import "image/color"
 
 var (
-	GridW      = 16
-	GridH      = 9
-	CellSizePx = 64
+	GridW      = 24
+	GridH      = 16
+	CellSizePx = 48
 )
 
 var GridColor color.Color = color.RGBA{

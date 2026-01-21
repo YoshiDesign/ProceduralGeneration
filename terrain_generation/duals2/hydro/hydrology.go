@@ -20,6 +20,13 @@ type HydroManager struct {
 	// Key: destination ChunkCoord, Value: rivers entering that chunk
 	RiverPropagation map[core.ChunkCoord][]core.RiverInterPoint
 
+	// Cross-chunk lake propagation
+	// Key: destination ChunkCoord, Value: lake boundaries entering that chunk
+	LakePropagation map[core.ChunkCoord][]core.LakeBoundaryPoint
+
+	// Track which chunks a lake spans (for water level updates)
+	LakeChunks map[int][]core.ChunkCoord // LakeID -> list of chunks
+
 	// Ocean region ownership
 	// Key: ChunkCoord, Value: OceanID (-1 if not ocean)
 	OceanChunks map[core.ChunkCoord]int
@@ -27,6 +34,10 @@ type HydroManager struct {
 	// Tracks visited sites during river tracing within a chunk.
 	// Reset before processing each chunk's hydrology.
 	VisitedSites map[int]bool
+
+	// Tracks which sites are already part of a lake (for deduplication)
+	// Key is (ChunkCoord, siteIndex) to ensure uniqueness across chunks
+	LakeSites map[core.ChunkSiteKey]int
 
 	// ID counters
 	NextRiverID int
@@ -51,9 +62,10 @@ type HydroConfig struct {
 	RiverSourceProbability float64 // Probability a valid source spawns a river (0-1)
 
 	// Lake parameters
-	LakeMinDepth     float64 // Minimum depression depth to form a lake
-	LakeMinArea      int     // Minimum number of vertices to form a lake
-	LakeProbability  float64 // Probability an eligible depression becomes a lake (0-1)
+	LakeMinDepth                 float64 // Minimum depression depth to form a lake
+	LakeMinArea                  int     // Minimum number of vertices to form a lake
+	LakeProbability              float64 // Probability an eligible depression becomes a lake (0-1)
+	LakeWaterLevelMergeThreshold float64 // If two lakes' water levels differ by less than this, merge them
 
 	// Ocean parameters
 	OceanMaxChunksX  int     // Maximum X span in chunks
@@ -78,9 +90,10 @@ func DefaultHydroConfig() HydroConfig {
 		RiverSourceMaxElev:     100.0, // Sources below 100 units elevation
 		RiverSourceProbability: 0.1,    // 30% of valid sources spawn rivers
 
-		LakeMinDepth:    2.0, // Depression must be at least 2 units deep
-		LakeMinArea:     3,   // At least 3 vertices
-		LakeProbability: 0.0, // 50% of eligible depressions become lakes
+		LakeMinDepth:                 2.0, // Depression must be at least 2 units deep
+		LakeMinArea:                  3,   // At least 3 vertices
+		LakeProbability:              0.0, // 50% of eligible depressions become lakes
+		LakeWaterLevelMergeThreshold: 2.0, // Merge lakes if within 2 units of elevation
 
 		OceanMaxChunksX:  8,   // Ocean can span up to 8 chunks in X
 		OceanMaxChunksZ:  8,   // Ocean can span up to 8 chunks in Z
@@ -92,15 +105,18 @@ func DefaultHydroConfig() HydroConfig {
 
 
 // NewHydroManager creates a new hydrology manager.
-	func NewHydroManager(cfg HydroConfig, seed int64) *HydroManager {
+func NewHydroManager(cfg HydroConfig, seed int64) *HydroManager {
 	return &HydroManager{
 		Cfg:              cfg,
 		Rng:              rand.New(rand.NewSource(seed)),
 		Rivers:           make(map[int]*core.River),
 		Lakes:            make(map[int]*core.Lake),
 		RiverPropagation: make(map[core.ChunkCoord][]core.RiverInterPoint),
+		LakePropagation:  make(map[core.ChunkCoord][]core.LakeBoundaryPoint),
+		LakeChunks:       make(map[int][]core.ChunkCoord),
 		OceanChunks:      make(map[core.ChunkCoord]int),
 		VisitedSites:     make(map[int]bool),
+		LakeSites:        make(map[core.ChunkSiteKey]int),
 	}
 }
 
@@ -228,4 +244,82 @@ func (hm *HydroManager) selectNextVertexV2(
 
 	return bestCandidate
 
+}
+
+// -------------------------------------------------------------------
+// Lake Propagation Methods
+// -------------------------------------------------------------------
+
+// RegisterLakeBoundary registers a lake boundary point for propagation to a neighbor chunk.
+func (hm *HydroManager) RegisterLakeBoundary(sourceChunk, destChunk core.ChunkCoord, boundary core.LakeBoundaryPoint) {
+	hm.LakePropagation[destChunk] = append(hm.LakePropagation[destChunk], boundary)
+
+	// Track which chunks this lake spans
+	chunks := hm.LakeChunks[boundary.LakeID]
+	// Check if destChunk is already in the list
+	found := false
+	for _, c := range chunks {
+		if c == destChunk {
+			found = true
+			break
+		}
+	}
+	if !found {
+		hm.LakeChunks[boundary.LakeID] = append(chunks, destChunk)
+	}
+}
+
+// GetLakeEntries returns lake boundaries that should enter this chunk from neighbors.
+func (hm *HydroManager) GetLakeEntries(chunk core.ChunkCoord) []core.LakeBoundaryPoint {
+	return hm.LakePropagation[chunk]
+}
+
+// ClearLakeEntries removes processed lake entries for a chunk.
+func (hm *HydroManager) ClearLakeEntries(chunk core.ChunkCoord) {
+	delete(hm.LakePropagation, chunk)
+}
+
+// UpdateLakeWaterLevel updates a lake's water level and returns the list of affected chunks.
+// This is called when a lower spillway is discovered in a later chunk.
+func (hm *HydroManager) UpdateLakeWaterLevel(lakeID int, newLevel float64) []core.ChunkCoord {
+	lake, exists := hm.Lakes[lakeID]
+	if !exists {
+		return nil
+	}
+
+	// Only update if the new level is lower
+	if newLevel >= lake.WaterLevel {
+		return nil
+	}
+
+	lake.WaterLevel = newLevel
+	return hm.LakeChunks[lakeID]
+}
+
+// MarkLakeSite marks a site as belonging to a lake (for deduplication).
+// Requires chunk coordinate to create a globally unique key.
+func (hm *HydroManager) MarkLakeSite(chunk core.ChunkCoord, siteIndex, lakeID int) {
+	key := core.ChunkSiteKey{Chunk: chunk, SiteIndex: siteIndex}
+	hm.LakeSites[key] = lakeID
+}
+
+// GetLakeForSite returns the lake ID for a site, or -1 if not in a lake.
+// Requires chunk coordinate to create a globally unique key.
+func (hm *HydroManager) GetLakeForSite(chunk core.ChunkCoord, siteIndex int) int {
+	key := core.ChunkSiteKey{Chunk: chunk, SiteIndex: siteIndex}
+	if lakeID, exists := hm.LakeSites[key]; exists {
+		return lakeID
+	}
+	return -1
+}
+
+// RegisterLakeInChunk records that a lake exists in a chunk.
+func (hm *HydroManager) RegisterLakeInChunk(lakeID int, chunk core.ChunkCoord) {
+	chunks := hm.LakeChunks[lakeID]
+	for _, c := range chunks {
+		if c == chunk {
+			return // Already registered
+		}
+	}
+	hm.LakeChunks[lakeID] = append(chunks, chunk)
 }

@@ -5,9 +5,9 @@ import (
 	"procedural_generation/terrain_generation/duals2/core"
 )
 
-// BuildSpatialIndex constructs a spatial grid for fast triangle lookup.
+// BuildSpatialGrid constructs a spatial grid for fast triangle lookup.
 // cellSize should be roughly the average triangle edge length for best performance.
-func BuildSpatialIndex(mesh *core.DelaunayMesh, heights []float64, cellSize, minX, minZ, maxX, maxZ float64) *core.SpatialGrid {
+func BuildSpatialGrid(mesh *core.DelaunayMesh, heights []float64, cellSize, minX, minZ, maxX, maxZ float64) *core.SpatialGrid {
 	if mesh == nil || len(mesh.Tris) == 0 {
 		return nil
 	}

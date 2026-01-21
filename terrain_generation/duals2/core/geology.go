@@ -1,5 +1,12 @@
 package core
 
+// ChunkSiteKey uniquely identifies a site across all chunks.
+// This is a general purpose key for tracking sites across chunks.
+type ChunkSiteKey struct {
+	Chunk     ChunkCoord
+	SiteIndex int
+}
+
 // FindLocalMinima identifies vertices that are lower than all their neighbors.
 // These are potential lake sites.
 func FindLocalMinima(mesh *DelaunayMesh, heights []float64) []int {

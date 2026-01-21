@@ -16,9 +16,29 @@ type ChunkHydroData struct {
 	Lakes  []Lake
 	Ocean  OceanChunkData
 
-	// Cross-chunk coordination
+	// Cross-chunk coordination for rivers
 	RiverEntries []RiverInterPoint // Rivers entering from neighbors
 	RiverExits   []RiverInterPoint // Rivers exiting to neighbors
+
+	// Cross-chunk coordination for lakes
+	LakeEntries []LakeBoundaryPoint // Lakes entering from neighbors
+	LakeExits   []LakeBoundaryPoint // Lakes exiting to neighbors
+}
+
+// LakeBoundaryPoint stores information about a lake crossing a chunk boundary.
+// This enables cross-chunk lake continuity.
+type LakeBoundaryPoint struct {
+	LakeID      int        // Global lake ID
+	WaterLevel  float64    // Current water level (may be provisional)
+	Position    Vec2       // World position at boundary
+	SiteIndex   int        // Site index in source chunk's mesh
+	EdgeIndex   int        // Which edge: 0=minX, 1=maxX, 2=minZ, 3=maxZ
+	SourceChunk ChunkCoord // Chunk this boundary came from
+}
+
+// ChunkBounds represents the bounds of a chunk for boundary detection.
+type ChunkBounds struct {
+	MinX, MinZ, MaxX, MaxZ float64
 }
 
 // HydroBodyType identifies the type of water body.
