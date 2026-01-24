@@ -35,9 +35,6 @@ func (m *DelaunayMesh) Barycentric(triID int, p Vec2) (wa, wb, wc float64, ok bo
 		return 0, 0, 0, false
 	}
 
-	// wb = cross(v2, v1) / denom
-	// wc = cross(v0, v2) / denom
-	// wa = 1 - wb - wc
 	wb = cross2(v2, v1) / denom
 	wc = cross2(v0, v2) / denom
 	wa = 1.0 - wb - wc
@@ -227,7 +224,7 @@ func (m *DelaunayMesh) SlopePercent(triID int, heights []float64) (float64, bool
 	return slope * 100.0, true
 }
 
-func (m *DelaunayMesh) findAnyOutgoing(site int) int {
+func (m *DelaunayMesh) findAnyOutgoing(site SiteIndex) int {
 	for i := range m.HalfEdges {
 		if m.HalfEdges[i].Origin == site {
 			return i
@@ -263,9 +260,9 @@ func angleSortAround(center Vec2, tris []int, verts []Vec2) {
 //
 // If the site touches the boundary of the triangulation, there will be a missing twin,
 // and the cell is “open” (infinite in true Voronoi). We return Closed=false.
-func (m *DelaunayMesh) VoronoiCellForSite(site int) VoronoiCell {
+func (m *DelaunayMesh) VoronoiCellForSite(site SiteIndex) VoronoiCell {
 	start := -1
-	if site >= 0 && site < len(m.SiteEdge) {
+	if site >= 0 && int(site) < len(m.SiteEdge) {
 		start = m.SiteEdge[site]
 	}
 	if start == -1 {

@@ -3,18 +3,18 @@ package core
 // ChunkSiteKey uniquely identifies a site across all chunks.
 // This is a general purpose key for tracking sites across chunks.
 type ChunkSiteKey struct {
-	Chunk     ChunkCoord
-	SiteIndex int
+	Coordinates     ChunkCoord
+	SiteIndex SiteIndex
 }
 
 // FindLocalMinima identifies vertices that are lower than all their neighbors.
 // These are potential lake sites.
-func FindLocalMinima(mesh *DelaunayMesh, heights []float64) []int {
-	minima := make([]int, 0)
+func FindLocalMinima(mesh *DelaunayMesh, heights []float64) []SiteIndex {
+	minima := make([]SiteIndex, 0)
 
 	for site := range mesh.Sites {
-		if isLocalMinimum(mesh, heights, site) {
-			minima = append(minima, site)
+		if isLocalMinimum(mesh, heights, SiteIndex(site)) {
+			minima = append(minima, SiteIndex(site))
 		}
 	}
 
@@ -22,7 +22,7 @@ func FindLocalMinima(mesh *DelaunayMesh, heights []float64) []int {
 }
 
 // isLocalMinimum returns true if the site is lower than all its neighbors.
-func isLocalMinimum(mesh *DelaunayMesh, heights []float64, site int) bool {
+func isLocalMinimum(mesh *DelaunayMesh, heights []float64, site SiteIndex) bool {
 	currentHeight := heights[site]
 
 	startEdge := mesh.SiteEdge[site]

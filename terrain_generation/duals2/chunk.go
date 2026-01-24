@@ -65,7 +65,7 @@ type TerrainChunk struct {
 	Spatial *core.SpatialGrid
 
 	// Which sites are in the core region (not halo)
-	CoreSiteIndices []int
+	CoreSiteIndices []core.SiteIndex
 
 	// Hydrology data
 	Hydro *core.ChunkHydroData
@@ -395,10 +395,10 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainCh
 	allPoints := cm.generateChunkPoints(coord)
 
 	// Track which points are in the core region
-	coreIndices := make([]int, 0, len(allPoints))
+	coreIndices := make([]core.SiteIndex, 0, len(allPoints))
 	for i, p := range allPoints {
 		if p.X >= chunk.MinX && p.X < chunk.MaxX && p.Y >= chunk.MinZ && p.Y < chunk.MaxZ {
-			coreIndices = append(coreIndices, i)
+			coreIndices = append(coreIndices, core.SiteIndex(i))
 		}
 	}
 	chunk.CoreSiteIndices = coreIndices
@@ -450,30 +450,29 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 		Lakes:        make([]core.Lake, 0),
 		RiverEntries: make([]core.RiverInterPoint, 0),
 		RiverExits:   make([]core.RiverInterPoint, 0),
-		LakeEntries:  make([]core.LakeBoundaryPoint, 0),
-		LakeExits:    make([]core.LakeBoundaryPoint, 0),
+		LakeEntries:  make([]core.LakeInterPoint, 0),
+		LakeExits:    make([]core.LakeInterPoint, 0),
 	}
+
+	/**
+		Might be wise to organize the initialization of the hydro data.
+		- Hydrology doesn't follow the phased architecture we've been supporting
+			Though it expresses it.
+	 */
 
 	// Print a bunch of "-"
 	fmt.Println("--------------------------------")
 
 	// Bounds in world-space
-	bounds := struct{ MinX, MinZ, MaxX, MaxZ float64 }{
-		// Min = chunkSize * coord.X
-		// Max = chunkSize * (coord.X + 1)
-		chunk.MinX, chunk.MinZ, chunk.MaxX, chunk.MaxZ,
-	}
-
-	// Lake bounds for boundary detection
-	lakeBounds := core.ChunkBounds{
-		MinX: chunk.MinX,
-		MinZ: chunk.MinZ,
-		MaxX: chunk.MaxX,
+	chunkBounds :=  core.ChunkBoundaryBox{
+		MinX: chunk.MinX, 
+		MinZ: chunk.MinZ, 
+		MaxX: chunk.MaxX, 
 		MaxZ: chunk.MaxZ,
 	}
 
 	// Reset visited sites tracking for this chunk's hydrology pass
-	// cm.hydroMgr.ResetVisitedcore.Sites()
+	cm.hydroMgr.ResetVisitedSites()
 
 	// 1. Process incoming rivers from neighbors - Never occurs for the first chunk
 	entries := cm.hydroMgr.GetRiverEntries(chunk.Coord)
@@ -495,7 +494,7 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 			chunk.Heights, 
 			&cm.hydroMgr.VisitedSites, 
 			nearestSite, 
-			bounds,
+			chunkBounds,
 			entry.Distance,
 		)
 
@@ -525,7 +524,7 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 			chunk.Heights, 
 			&cm.hydroMgr.VisitedSites, 
 			source, 
-			bounds,
+			chunkBounds,
 			 0,
 		)
 
@@ -554,7 +553,7 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 	// }
 
 	// 3. Process incoming lake boundaries from neighbors FIRST
-	lakeEntries := cm.hydroMgr.GetLakeEntries(chunk.Coord)
+	chunkLakeEntries := cm.hydroMgr.GetLakeEntries(chunk.Coord)
 
 	// #region agent log
 	debugLogPath := `c:\Users\Yoshi\go\src\procedural_generation\terrain_generation\.cursor\debug.log`
@@ -572,28 +571,30 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 	}
 	chunkLogEntry("HYDRO_START", map[string]interface{}{
 		"chunk": fmt.Sprintf("(%d,%d)", chunk.Coord.X, chunk.Coord.Z),
-		"lakeEntriesCount": len(lakeEntries),
+		"lakeEntriesCount": len(chunkLakeEntries),
 		"totalLakesInMgr": len(cm.hydroMgr.Lakes),
 	})
 	// #endregion
 
-	for _, entry := range lakeEntries {
+	for _, entry := range chunkLakeEntries {
 		hydro.LakeEntries = append(hydro.LakeEntries, entry)
 
-		// #region agent log
+		// #region agent lo
 		chunkLogEntry("LAKE_ENTRY_PROCESSING", map[string]interface{}{
 			"entryLakeID": entry.LakeID, "entryWaterLevel": entry.WaterLevel,
-			"entryEdgeIndex": entry.EdgeIndex, "hypothesisJ": len(lakeEntries) > 20,
+			"entrySideIndex": entry.Side, "hypothesisJ": len(chunkLakeEntries) > 20,
 		})
 		// #endregion
 
 		// Find the nearest site to the entry point
+		// PROBLEM?: findNearestSite searches the entire mesh for the nearest site.
+		// We built a half-edge mesh, so we should be able to find the nearest site using the twin->next->twin->next... chain.
 		nearestSite := cm.findNearestSite(chunk.Mesh, entry.Position)
 		if nearestSite < 0 {
 			continue
 		}
 
-		// Check if this site is already part of a lake
+		// Check if this site is already part of a lake.
 		existingLakeID := cm.hydroMgr.GetLakeForSite(chunk.Coord, nearestSite)
 
 		// FIX: Skip if site is already part of THIS SAME lake (prevents circular propagation)
@@ -628,8 +629,8 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 		lake, exits := cm.hydroMgr.FloodFillLakeWithBoundaries(
 			chunk.Mesh,
 			chunk.Heights,
-			nearestSite,
-			lakeBounds,
+			core.SiteIndex(nearestSite),
+			chunkBounds, // Note: at this point this is simply the chunk's x/z plane
 			chunk.Coord,
 			entry.LakeID,
 		)
@@ -640,7 +641,7 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 
 			// Register boundary exits for propagation to neighbors
 			for _, exit := range exits {
-				destChunk := cm.getNeighborChunkForEdge(chunk.Coord, exit.EdgeIndex)
+				destChunk := cm.getNeighborChunkForEdge(chunk.Coord, exit.Side)
 				cm.hydroMgr.RegisterLakeBoundary(chunk.Coord, destChunk, exit)
 				hydro.LakeExits = append(hydro.LakeExits, exit)
 			}
@@ -648,15 +649,19 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 	}
 	cm.hydroMgr.ClearLakeEntries(chunk.Coord)
 
-	// 4. Detect NEW lakes at local minima (excluding sites already in lakes)
+	// Detect NEW lakes at local minima (excluding sites already in lakes)
+	// `minima` is a list of sites with lower height than all their neighbors
 	minima := core.FindLocalMinima(chunk.Mesh, chunk.Heights)
 
 	for _, minimum := range minima {
 		// Skip if this site is already part of a lake
+		// NOTE: This could happen ahead of time. Filter minima beforehand, though not terrible
+		// NOTE: This implies a lake was continued from a neighbor and we either merged or watershed
 		if cm.hydroMgr.GetLakeForSite(chunk.Coord, minimum) != -1 {
 			continue
 		}
-
+ 
+		// ?? Why is it problematic if the site isn't in the core region?
 		// Check if this minimum is in the core region
 		isCore := false
 		for _, coreIdx := range chunk.CoreSiteIndices {
@@ -673,7 +678,7 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 			chunk.Mesh,
 			chunk.Heights,
 			minimum,
-			lakeBounds,
+			chunkBounds,
 			chunk.Coord,
 			-1, // New lake
 		)
@@ -689,7 +694,7 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 
 			// Register boundary exits for propagation to neighbors
 			for _, exit := range exits {
-				destChunk := cm.getNeighborChunkForEdge(chunk.Coord, exit.EdgeIndex)
+				destChunk := cm.getNeighborChunkForEdge(chunk.Coord, exit.Side)
 				cm.hydroMgr.RegisterLakeBoundary(chunk.Coord, destChunk, exit)
 				hydro.LakeExits = append(hydro.LakeExits, exit)
 			}
@@ -704,8 +709,8 @@ func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkH
 
 // getNeighborChunkForEdge returns the neighbor chunk in the direction of the given edge.
 // Edge indices: 0=minX, 1=maxX, 2=minZ, 3=maxZ
-func (cm *ChunkManager) getNeighborChunkForEdge(chunk core.ChunkCoord, edge int) core.ChunkCoord {
-	switch edge {
+func (cm *ChunkManager) getNeighborChunkForEdge(chunk core.ChunkCoord, side core.SideIndex) core.ChunkCoord {
+	switch side {
 	case 0: // minX edge -> neighbor to the west
 		return core.ChunkCoord{X: chunk.X - 1, Z: chunk.Z}
 	case 1: // maxX edge -> neighbor to the east
@@ -720,15 +725,15 @@ func (cm *ChunkManager) getNeighborChunkForEdge(chunk core.ChunkCoord, edge int)
 }
 
 // findNearestSite finds the mesh site closest to a given position.
-func (cm *ChunkManager) findNearestSite(mesh *core.DelaunayMesh, pos core.Vec2) int {
+func (cm *ChunkManager) findNearestSite(mesh *core.DelaunayMesh, pos core.Vec2) core.SiteIndex {
 	bestDist := float64(1e18)
-	bestSite := -1
+	bestSite := core.SiteIndex(-1)
 
 	for i, site := range mesh.Sites {
 		d := site.Pos.Sub(pos).Len2()
 		if d < bestDist {
 			bestDist = d
-			bestSite = i
+			bestSite = core.SiteIndex(i)
 		}
 	}
 

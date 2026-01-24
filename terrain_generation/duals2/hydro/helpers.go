@@ -6,7 +6,7 @@ import (
 )
 
 // isNearLocalMaximum returns true if the site is higher than most neighbors.
-func isNearLocalMaximum(mesh *core.DelaunayMesh, heights []float64, site int) bool {
+func isNearLocalMaximum(mesh *core.DelaunayMesh, heights []float64, site core.SiteIndex) bool {
 	currentHeight := heights[site]
 	higherCount := 0
 	totalNeighbors := 0

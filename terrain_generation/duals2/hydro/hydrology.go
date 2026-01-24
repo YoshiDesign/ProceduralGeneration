@@ -22,7 +22,7 @@ type HydroManager struct {
 
 	// Cross-chunk lake propagation
 	// Key: destination ChunkCoord, Value: lake boundaries entering that chunk
-	LakePropagation map[core.ChunkCoord][]core.LakeBoundaryPoint
+	LakePropagation map[core.ChunkCoord][]core.LakeInterPoint
 
 	// Track which chunks a lake spans (for water level updates)
 	LakeChunks map[int][]core.ChunkCoord // LakeID -> list of chunks
@@ -33,7 +33,7 @@ type HydroManager struct {
 
 	// Tracks visited sites during river tracing within a chunk.
 	// Reset before processing each chunk's hydrology.
-	VisitedSites map[int]bool
+	VisitedSites map[core.SiteIndex]bool
 
 	// Tracks which sites are already part of a lake (for deduplication)
 	// Key is (ChunkCoord, siteIndex) to ensure uniqueness across chunks
@@ -44,7 +44,6 @@ type HydroManager struct {
 	NextLakeID  int
 	NextOceanID int
 }
-
 
 // HydroConfig holds parameters for hydrology generation.
 type HydroConfig struct {
@@ -58,7 +57,7 @@ type HydroConfig struct {
 	RiverDepthBase      float64 // Starting depth at source
 	RiverDepthGrowth    float64 // Depth increase per unit distance traveled
 	RiverSourceMinElev  float64 // Minimum elevation for river sources
-	RiverSourceMaxElev  float64 // TODO Maximum elevation for river sources
+	RiverSourceMaxElev  float64 // Maximum elevation for river sources
 	RiverSourceProbability float64 // Probability a valid source spawns a river (0-1)
 
 	// Lake parameters
@@ -103,7 +102,6 @@ func DefaultHydroConfig() HydroConfig {
 	}
 }
 
-
 // NewHydroManager creates a new hydrology manager.
 func NewHydroManager(cfg HydroConfig, seed int64) *HydroManager {
 	return &HydroManager{
@@ -112,14 +110,13 @@ func NewHydroManager(cfg HydroConfig, seed int64) *HydroManager {
 		Rivers:           make(map[int]*core.River),
 		Lakes:            make(map[int]*core.Lake),
 		RiverPropagation: make(map[core.ChunkCoord][]core.RiverInterPoint),
-		LakePropagation:  make(map[core.ChunkCoord][]core.LakeBoundaryPoint),
+		LakePropagation:  make(map[core.ChunkCoord][]core.LakeInterPoint),
 		LakeChunks:       make(map[int][]core.ChunkCoord),
 		OceanChunks:      make(map[core.ChunkCoord]int),
-		VisitedSites:     make(map[int]bool),
+		VisitedSites:     make(map[core.SiteIndex]bool),
 		LakeSites:        make(map[core.ChunkSiteKey]int),
 	}
 }
-
 
 // FlowBias returns the preferred flow direction based on position relative to equator.
 // North of equator (Z > EquatorZ): bias toward south (negative Z).
@@ -132,14 +129,13 @@ func (cfg *HydroConfig) FlowBias(worldZ float64) core.Vec2 {
 	return core.Vec2{X: 0, Y: 1} // Flow north
 }
 
-
 // ResetVisitedSites clears the visited sites map for a new chunk's hydrology pass.
 func (hm *HydroManager) ResetVisitedSites() {
-	hm.VisitedSites = make(map[int]bool)
+	hm.VisitedSites = make(map[core.SiteIndex]bool)
 }
 
 // IsSourceVisited returns true if the given site has already been visited by a river trace.
-func (hm *HydroManager) IsSourceVisited(site int) bool {
+func (hm *HydroManager) IsSourceVisited(site core.SiteIndex) bool {
 	return hm.VisitedSites != nil && hm.VisitedSites[site]
 }
 
@@ -147,19 +143,17 @@ func (hm *HydroManager) IsSourceVisited(site int) bool {
 // River Tracing Algorithm
 // -------------------------------------------------------------------
 
-
 // selectNextVertex chooses the next vertex for river flow.
 // Prefers steeper slopes but applies flow bias for tie-breaking.
-// TODO: This wont matter. Vulkan can carve f*cking valleys.
-//		 Don't bias based on slope. This will be for the tectonics layer in the near future.
-func (hm *HydroManager) selectNextVertex(
+// V1: Bias based on slope
+func (hm *HydroManager) selectNextVertexV1(
 	mesh *core.DelaunayMesh,
 	heights []float64,
-	current int,
-	candidates []int,
+	current core.SiteIndex,
+	candidates []core.SiteIndex,
 	currentHeight float64,
 	bias core.Vec2,
-) int {
+) core.SiteIndex {
 	if len(candidates) == 1 {
 		return candidates[0]
 	}
@@ -203,10 +197,10 @@ func (hm *HydroManager) selectNextVertex(
 // NOTE: V2 will ignore slope
 func (hm *HydroManager) selectNextVertexV2(
 	mesh *core.DelaunayMesh,
-	current int,
-	candidates []int,
+	current core.SiteIndex,
+	candidates []core.SiteIndex,
 	bias core.Vec2,
-) int {
+) core.SiteIndex {
 
 	if len(candidates) == 1 {
 		return candidates[0]
@@ -244,82 +238,4 @@ func (hm *HydroManager) selectNextVertexV2(
 
 	return bestCandidate
 
-}
-
-// -------------------------------------------------------------------
-// Lake Propagation Methods
-// -------------------------------------------------------------------
-
-// RegisterLakeBoundary registers a lake boundary point for propagation to a neighbor chunk.
-func (hm *HydroManager) RegisterLakeBoundary(sourceChunk, destChunk core.ChunkCoord, boundary core.LakeBoundaryPoint) {
-	hm.LakePropagation[destChunk] = append(hm.LakePropagation[destChunk], boundary)
-
-	// Track which chunks this lake spans
-	chunks := hm.LakeChunks[boundary.LakeID]
-	// Check if destChunk is already in the list
-	found := false
-	for _, c := range chunks {
-		if c == destChunk {
-			found = true
-			break
-		}
-	}
-	if !found {
-		hm.LakeChunks[boundary.LakeID] = append(chunks, destChunk)
-	}
-}
-
-// GetLakeEntries returns lake boundaries that should enter this chunk from neighbors.
-func (hm *HydroManager) GetLakeEntries(chunk core.ChunkCoord) []core.LakeBoundaryPoint {
-	return hm.LakePropagation[chunk]
-}
-
-// ClearLakeEntries removes processed lake entries for a chunk.
-func (hm *HydroManager) ClearLakeEntries(chunk core.ChunkCoord) {
-	delete(hm.LakePropagation, chunk)
-}
-
-// UpdateLakeWaterLevel updates a lake's water level and returns the list of affected chunks.
-// This is called when a lower spillway is discovered in a later chunk.
-func (hm *HydroManager) UpdateLakeWaterLevel(lakeID int, newLevel float64) []core.ChunkCoord {
-	lake, exists := hm.Lakes[lakeID]
-	if !exists {
-		return nil
-	}
-
-	// Only update if the new level is lower
-	if newLevel >= lake.WaterLevel {
-		return nil
-	}
-
-	lake.WaterLevel = newLevel
-	return hm.LakeChunks[lakeID]
-}
-
-// MarkLakeSite marks a site as belonging to a lake (for deduplication).
-// Requires chunk coordinate to create a globally unique key.
-func (hm *HydroManager) MarkLakeSite(chunk core.ChunkCoord, siteIndex, lakeID int) {
-	key := core.ChunkSiteKey{Chunk: chunk, SiteIndex: siteIndex}
-	hm.LakeSites[key] = lakeID
-}
-
-// GetLakeForSite returns the lake ID for a site, or -1 if not in a lake.
-// Requires chunk coordinate to create a globally unique key.
-func (hm *HydroManager) GetLakeForSite(chunk core.ChunkCoord, siteIndex int) int {
-	key := core.ChunkSiteKey{Chunk: chunk, SiteIndex: siteIndex}
-	if lakeID, exists := hm.LakeSites[key]; exists {
-		return lakeID
-	}
-	return -1
-}
-
-// RegisterLakeInChunk records that a lake exists in a chunk.
-func (hm *HydroManager) RegisterLakeInChunk(lakeID int, chunk core.ChunkCoord) {
-	chunks := hm.LakeChunks[lakeID]
-	for _, c := range chunks {
-		if c == chunk {
-			return // Already registered
-		}
-	}
-	hm.LakeChunks[lakeID] = append(chunks, chunk)
 }

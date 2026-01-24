@@ -138,7 +138,7 @@ func (d *DualsDemo) buildRenderData(chunk *TerrainChunk) {
 	}
 
 	// Build a set of core site indices for fast lookup
-	coreSet := make(map[int]struct{}, len(chunk.CoreSiteIndices))
+	coreSet := make(map[core.SiteIndex]struct{}, len(chunk.CoreSiteIndices))
 	for _, ci := range chunk.CoreSiteIndices {
 		coreSet[ci] = struct{}{}
 	}
@@ -149,9 +149,9 @@ func (d *DualsDemo) buildRenderData(chunk *TerrainChunk) {
 	// Count core triangles first to pre-allocate
 	coreTriCount := 0
 	for _, t := range mesh.Tris {
-		_, aCore := coreSet[t.A]
-		_, bCore := coreSet[t.B]
-		_, cCore := coreSet[t.C]
+		_, aCore := coreSet[core.SiteIndex(t.A)]
+		_, bCore := coreSet[core.SiteIndex(t.B)]
+		_, cCore := coreSet[core.SiteIndex(t.C)]
 		if aCore || bCore || cCore {
 			coreTriCount++
 		}
@@ -165,9 +165,9 @@ func (d *DualsDemo) buildRenderData(chunk *TerrainChunk) {
 
 	for ti, t := range mesh.Tris {
 		// Only include triangles with at least one core vertex
-		_, aCore := coreSet[t.A]
-		_, bCore := coreSet[t.B]
-		_, cCore := coreSet[t.C]
+		_, aCore := coreSet[core.SiteIndex(t.A)]
+		_, bCore := coreSet[core.SiteIndex(t.B)]
+		_, cCore := coreSet[core.SiteIndex(t.C)]
 		if !aCore && !bCore && !cCore {
 			continue
 		}
@@ -268,7 +268,7 @@ func (d *DualsDemo) buildLakeRenderData(chunk *TerrainChunk) {
 	allLakeSites := make(map[int]struct{})
 	for _, lake := range chunk.Hydro.Lakes {
 		for _, idx := range lake.SiteIndices {
-			allLakeSites[idx] = struct{}{}
+			allLakeSites[int(idx)] = struct{}{}
 		}
 	}
 
@@ -579,7 +579,7 @@ func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *TerrainChunk) {
 		// Create a set of lake site indices for fast lookup
 		lakeSites := make(map[int]bool)
 		for _, idx := range lake.SiteIndices {
-			lakeSites[idx] = true
+			lakeSites[int(idx)] = true
 		}
 
 		// Draw lake outline by finding boundary edges

@@ -13,9 +13,9 @@ import "procedural_generation/terrain_generation/duals2/core"
 func (hm *HydroManager) FindRiverSources(
 	mesh *core.DelaunayMesh,
 	heights []float64,
-	coreSiteIndices []int,
-) []int {
-	sources := make([]int, 0)
+	coreSiteIndices []core.SiteIndex,
+) []core.SiteIndex {
+	sources := make([]core.SiteIndex, 0)
 
 	candidateCount := 0
 	for _, site := range coreSiteIndices {
@@ -51,9 +51,9 @@ func (hm *HydroManager) FindRiverSources(
 func (hm *HydroManager) TraceRiver(
 	mesh *core.DelaunayMesh,
 	heights []float64,
-	visitedSites *map[int]bool,
-	startSite int,	// source - A Site/vertex
-	chunkBounds struct{ MinX, MinZ, MaxX, MaxZ float64 },
+	visitedSites *map[core.SiteIndex]bool,
+	startSite core.SiteIndex,	// source - A Site/vertex
+	chunkBounds core.ChunkBoundaryBox,
 	distanceTraveled float64,
 ) (core.RiverSegment, *core.RiverInterPoint) {
 
@@ -64,7 +64,7 @@ func (hm *HydroManager) TraceRiver(
 	}
 
 	current := startSite
-	visited := make(map[int]bool)
+	visited := make(map[core.SiteIndex]bool)
 	distance := distanceTraveled
 	width := hm.Cfg.RiverWidthBase
 	depth := hm.Cfg.RiverDepthBase
@@ -125,7 +125,7 @@ func (hm *HydroManager) TraceRiver(
 
 		// Apply flow bias for tie-breaking
 		bias := hm.Cfg.FlowBias(pos.Y) // pos.Y is Z in world space
-		next := hm.selectNextVertex(mesh, heights, current, neighbors, h, bias)
+		next := hm.selectNextVertexV1(mesh, heights, current, neighbors, h, bias)
 
 		// Calculate step
 		nextPos := mesh.Sites[next].Pos
@@ -156,9 +156,9 @@ func (hm *HydroManager) TraceRiver(
 func (hm *HydroManager) TraceRiverV2(
 	mesh *core.DelaunayMesh,
 	heights []float64,
-	visitedSites *map[int]bool,
-	startSite int,	// source - A Site/vertex
-	chunkBounds struct{ MinX, MinZ, MaxX, MaxZ float64 },
+	visitedSites *map[core.SiteIndex]bool,
+	startSite core.SiteIndex,	// source - A Site/vertex
+	chunkBounds core.ChunkBoundaryBox,
 	distanceTraveled float64,
 ) (core.RiverSegment, *core.RiverInterPoint) {
 
@@ -169,7 +169,7 @@ func (hm *HydroManager) TraceRiverV2(
 	}
 
 	current := startSite
-	visited := make(map[int]bool)
+	visited := make(map[core.SiteIndex]bool)
 	distance := distanceTraveled
 	width := hm.Cfg.RiverWidthBase
 	depth := hm.Cfg.RiverDepthBase

@@ -7,8 +7,8 @@ import "procedural_generation/terrain_generation/duals2/core"
  * Neighbor is added to selections if `heights[dest] < currentHeight-cfg.RiverMinSlope`
  * Measurement begins with the current site's height.
  */
-func getLowerNeighbors(mesh *core.DelaunayMesh, cfg HydroConfig, heights []float64, site int) []int {
-	neighbors := make([]int, 0, 8)
+func getLowerNeighbors(mesh *core.DelaunayMesh, cfg HydroConfig, heights []float64, site core.SiteIndex) []core.SiteIndex {
+	neighbors := make([]core.SiteIndex, 0, 8)
 	currentHeight := heights[site]
 
 	// Use half-edge structure to find neighbors
@@ -26,7 +26,7 @@ func getLowerNeighbors(mesh *core.DelaunayMesh, cfg HydroConfig, heights []float
 		}
 		visited[edge] = true
 
-		// Get destination of this edge
+		// Get destination of this edge (site)
 		dest := mesh.HalfEdges[edge].EdgeDest
 		if heights[dest] < currentHeight-cfg.RiverMinSlope {
 			neighbors = append(neighbors, dest)
@@ -50,9 +50,9 @@ func getLowerNeighbors(mesh *core.DelaunayMesh, cfg HydroConfig, heights []float
  *	getFlowBiasedNeighbors returns site indices of neighbors aligned with the flow bias.
  *  Neighbor is added to selections if `biasAlignment > 0.1`
  */
-func getFlowBiasedNeighbors(mesh *core.DelaunayMesh, site int, bias core.Vec2) []int {
+func getFlowBiasedNeighbors(mesh *core.DelaunayMesh, site core.SiteIndex, bias core.Vec2) []core.SiteIndex {
 
-	neighbors := make([]int, 0, 8)
+	neighbors := make([]core.SiteIndex, 0, 8)
 
 	// Use half-edge structure to find neighbors
 	startEdge := mesh.SiteEdge[site]

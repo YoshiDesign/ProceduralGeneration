@@ -5,15 +5,93 @@ import (
 	"procedural_generation/terrain_generation/duals2/core"
 )
 
+// -------------------------------------------------------------------
+// Lake Propagation Methods
+// -------------------------------------------------------------------
+
+// RegisterLakeBoundary registers a lake boundary point for propagation to a neighbor chunk.
+func (hm *HydroManager) RegisterLakeBoundary(sourceChunk, destChunk core.ChunkCoord, boundary core.LakeInterPoint) {
+	hm.LakePropagation[destChunk] = append(hm.LakePropagation[destChunk], boundary)
+
+	// Track which chunks this lake spans
+	chunks := hm.LakeChunks[boundary.LakeID]
+	// Check if destChunk is already in the list
+	found := false
+	for _, c := range chunks {
+		if c == destChunk {
+			found = true
+			break
+		}
+	}
+	if !found {
+		hm.LakeChunks[boundary.LakeID] = append(chunks, destChunk)
+	}
+}
+
+// GetLakeEntries returns lake boundaries that should enter this chunk from neighbors.
+func (hm *HydroManager) GetLakeEntries(chunk_coord core.ChunkCoord) []core.LakeInterPoint {
+	return hm.LakePropagation[chunk_coord]
+}
+
+// ClearLakeEntries removes processed lake entries for a chunk.
+func (hm *HydroManager) ClearLakeEntries(chunk_coord core.ChunkCoord) {
+	delete(hm.LakePropagation, chunk_coord)
+}
+
+// UpdateLakeWaterLevel updates a lake's water level and returns the list of affected chunks.
+// This is called when a lower spillway is discovered in a later chunk.
+func (hm *HydroManager) UpdateLakeWaterLevel(lakeID int, newLevel float64) []core.ChunkCoord {
+	lake, exists := hm.Lakes[lakeID]
+	if !exists {
+		return nil
+	}
+
+	// Only update if the new level is lower
+	if newLevel >= lake.WaterLevel {
+		return nil
+	}
+
+	lake.WaterLevel = newLevel
+	return hm.LakeChunks[lakeID]
+}
+
+// MarkLakeSite marks a site as belonging to a lake (for deduplication).
+// Requires chunk coordinate to create a globally unique key.
+func (hm *HydroManager) MarkLakeSite(coordinates core.ChunkCoord, siteIndex core.SiteIndex, lakeID int) {
+	key := core.ChunkSiteKey{Coordinates: coordinates, SiteIndex: siteIndex}
+	hm.LakeSites[key] = lakeID
+}
+
+// GetLakeForSite returns the lake ID for a site, or -1 if not in a lake.
+// Requires chunk coordinate to create a globally unique key.
+func (hm *HydroManager) GetLakeForSite(coordinates core.ChunkCoord, siteIndex core.SiteIndex) int {
+	key := core.ChunkSiteKey{Coordinates: coordinates, SiteIndex: siteIndex}
+	if lakeID, exists := hm.LakeSites[key]; exists {
+		return lakeID
+	}
+	return -1
+}
+
+// RegisterLakeInChunk records that a lake exists in a chunk.
+func (hm *HydroManager) RegisterLakeInChunk(lakeID int, coordinates core.ChunkCoord) {
+	chunks := hm.LakeChunks[lakeID]
+	for _, c := range chunks {
+		if c == coordinates {
+			return // Already registered
+		}
+	}
+	hm.LakeChunks[lakeID] = append(chunks, coordinates)
+}
+
 // FloodFillLake fills a depression from a local minimum to find lake extent.
 // Returns the lake if valid, nil otherwise.
 // This is the original simple version for backward compatibility.
 func (hm *HydroManager) FloodFillLake(
 	mesh *core.DelaunayMesh,
 	heights []float64,
-	minimum int,
+	minimum core.SiteIndex,
 ) *core.Lake {
-	lake, _ := hm.FloodFillLakeWithBoundaries(mesh, heights, minimum, core.ChunkBounds{}, core.ChunkCoord{}, -1)
+	lake, _ := hm.FloodFillLakeWithBoundaries(mesh, heights, minimum, core.ChunkBoundaryBox{}, core.ChunkCoord{}, -1)
 	return lake
 }
 
@@ -25,11 +103,11 @@ func (hm *HydroManager) FloodFillLake(
 func (hm *HydroManager) FloodFillLakeWithBoundaries(
 	mesh *core.DelaunayMesh,
 	heights []float64,
-	minimum int,
-	chunkBounds core.ChunkBounds,
+	minimum core.SiteIndex, // Index into []Sites
+	chunkBounds core.ChunkBoundaryBox,
 	sourceChunk core.ChunkCoord,
 	existingLakeID int,
-) (*core.Lake, []core.LakeBoundaryPoint) {
+) (*core.Lake, []core.LakeInterPoint) {
 	// Check probability - if 0, never create lakes (only for new lakes)
 	if existingLakeID == -1 && hm.Rng.Float64() >= hm.Cfg.LakeProbability {
 		return nil, nil
@@ -38,11 +116,11 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 	minHeight := heights[minimum]
 
 	// Find all connected vertices below the spillway level
-	filled := make(map[int]bool)
-	frontier := []int{minimum}
-	filled[minimum] = true
+	filled := make(map[core.SiteIndex]bool)
+	frontier := []core.SiteIndex{minimum} // Site indices 1D
+	filled[minimum] = true // tracking filled sites
 
-	var spillway *int
+	var spillway *core.SiteIndex
 	spillwayHeight := math.Inf(1)
 
 	// If continuing an existing lake, use its water level as initial spillway
@@ -53,29 +131,31 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 	}
 
 	// Track boundary sites for propagation
-	boundarySites := make(map[int]int) // siteIndex -> edgeIndex (0=minX, 1=maxX, 2=minZ, 3=maxZ)
+	boundarySites := make(map[core.SiteIndex]core.SideIndex)
 
 	// Threshold for boundary detection (slightly inside the core bounds)
 	const boundaryThreshold = 1.0
 
 	for len(frontier) > 0 {
-		current := frontier[0]
-		frontier = frontier[1:]
+		current := frontier[0] // QUEUE POP
+		frontier = frontier[1:] // QUEUE SHIFT
 
 		// Check if current site is near a chunk boundary
-		if chunkBounds.MaxX > chunkBounds.MinX { // bounds are set
-			pos := mesh.Sites[current].Pos
-			if pos.X <= chunkBounds.MinX+boundaryThreshold {
-				boundarySites[current] = 0 // minX edge
-			} else if pos.X >= chunkBounds.MaxX-boundaryThreshold {
-				boundarySites[current] = 1 // maxX edge
-			}
-			if pos.Y <= chunkBounds.MinZ+boundaryThreshold {
-				boundarySites[current] = 2 // minZ edge
-			} else if pos.Y >= chunkBounds.MaxZ-boundaryThreshold {
-				boundarySites[current] = 3 // maxZ edge
-			}
+		//if chunkBounds.MaxX > chunkBounds.MinX { // bounds are set
+
+		// Track chunk boundary/side proximity conditions
+		pos := mesh.Sites[current].Pos
+		if pos.X <= chunkBounds.MinX+boundaryThreshold {
+			boundarySites[current] = core.WEST_EDGE // minX edge
+		} else if pos.X >= chunkBounds.MaxX-boundaryThreshold {
+			boundarySites[current] = core.EAST_EDGE // maxX edge
 		}
+		if pos.Y <= chunkBounds.MinZ+boundaryThreshold {
+			boundarySites[current] = core.NORTH_EDGE // minZ edge
+		} else if pos.Y >= chunkBounds.MaxZ-boundaryThreshold {
+			boundarySites[current] = core.SOUTH_EDGE // maxZ edge
+		}
+		//}
 
 		// Check neighbors
 		startEdge := mesh.SiteEdge[current]
@@ -92,46 +172,47 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 			}
 			visited[edge] = true
 
+			// `dest` is a Site index
 			dest := mesh.HalfEdges[edge].EdgeDest
-			destHeight := heights[dest]
+			destHeight := heights[dest] // index into corresponding elevation
 
-		if !filled[dest] {
-			if destHeight < spillwayHeight {
-				// For NEW lakes: use depression threshold AND limit maximum size
-				// For CONTINUED lakes: use existing water level as threshold
-				// This allows continued lakes to fill properly across chunk boundaries
-				// while preventing new lakes from consuming entire chunks
-				
-				canFill := false
-				var threshold float64
-				
-				if existingLakeID != -1 {
-					// Continuing existing lake: use the established water level as threshold
-					// Any site below the water level that is connected should be filled
-					threshold = spillwayHeight
-					canFill = true // Already checked destHeight < spillwayHeight above
-				} else {
-					// New lake: use depression threshold from local minimum
-					// Also enforce a maximum size to prevent chunk-filling lakes
-					threshold = minHeight + hm.Cfg.LakeMinDepth*2
-					maxNewLakeSize := len(mesh.Sites) / 3 // Max 1/3 of chunk for new lakes
-					if destHeight <= threshold && len(filled) < maxNewLakeSize {
-						canFill = true
+			if !filled[dest] {
+				if destHeight < spillwayHeight {
+					// For NEW lakes: use depression threshold AND limit maximum size
+					// For CONTINUED lakes: use existing water level as threshold
+					// This allows continued lakes to fill properly across chunk boundaries
+					// while preventing new lakes from consuming entire chunks
+
+					canFill := false
+					var threshold float64
+
+					if existingLakeID != -1 {
+						// Continuing existing lake: use the established water level as threshold
+						// Any site below the water level that is connected should be filled
+						threshold = spillwayHeight
+						canFill = true // Already checked destHeight < spillwayHeight above
+					} else {
+						// New lake: use depression threshold from local minimum
+						// // Also enforce a maximum size to prevent chunk-filling lakes
+						threshold = minHeight + hm.Cfg.LakeMinDepth
+						// maxNewLakeSize := len(mesh.Sites) / 3 // Max 1/3 of chunk for new lakes
+						if destHeight <= threshold /* && len(filled) < maxNewLakeSize */ {
+							canFill = true
+						}
 					}
-				}
-				
-				if canFill {
-					filled[dest] = true
-					frontier = append(frontier, dest)
-				} else {
-					// Potential spillway - this site blocks expansion
-					if destHeight < spillwayHeight {
-						spillwayHeight = destHeight
-						spillway = &dest
+
+					if canFill {
+						filled[dest] = true
+						frontier = append(frontier, dest)
+					} else {
+						// Potential spillway - this site blocks expansion
+						if destHeight < spillwayHeight {
+							spillwayHeight = destHeight
+							spillway = &dest
+						}
 					}
 				}
 			}
-		}
 
 			twin := mesh.HalfEdges[edge].Twin
 			if twin == -1 {
@@ -150,7 +231,7 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 	}
 
 	// Calculate lake properties
-	siteIndices := make([]int, 0, len(filled))
+	siteIndices := make([]core.SiteIndex, 0, len(filled))
 	var centerX, centerZ float64
 	maxDepth := 0.0
 
@@ -213,16 +294,16 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 	}
 
 	// Create boundary points for sites near chunk edges
-	var boundaryPoints []core.LakeBoundaryPoint
-	for siteIdx, edgeIdx := range boundarySites {
+	var boundaryPoints []core.LakeInterPoint
+	for siteIdx, side := range boundarySites {
 		if filled[siteIdx] {
 			pos := mesh.Sites[siteIdx].Pos
-			boundaryPoints = append(boundaryPoints, core.LakeBoundaryPoint{
+			boundaryPoints = append(boundaryPoints, core.LakeInterPoint{
 				LakeID:      lakeID,
 				WaterLevel:  spillwayHeight,
 				Position:    pos,
 				SiteIndex:   siteIdx,
-				EdgeIndex:   edgeIdx,
+				Side:   	 side,
 				SourceChunk: sourceChunk,
 			})
 		}
@@ -257,7 +338,7 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 func (hm *HydroManager) HandleLakeOverlap(
 	existingLakeID int,
 	newLakeID int,
-	sharedSites []int,
+	sharedSites []core.SiteIndex,
 	watershedWeights []float64,
 ) (shouldMerge bool, mergedIntoID int) {
 	existingLake, existsExisting := hm.Lakes[existingLakeID]
@@ -287,7 +368,7 @@ func (hm *HydroManager) HandleLakeOverlap(
 		if weight < 0.5 {
 			weight = 0.5 // Minimum watershed visibility
 		}
-		if site < len(watershedWeights) {
+		if int(site) < len(watershedWeights) {
 			watershedWeights[site] = weight
 		}
 	}
@@ -347,19 +428,19 @@ func (hm *HydroManager) MergeLakes(targetID, sourceID int) {
 // Note: Only sites valid for the given mesh are considered (lake sites may come from different chunks).
 func (hm *HydroManager) FindSharedBoundarySites(
 	mesh *core.DelaunayMesh,
-	lake1Sites, lake2Sites []int,
-) []int {
-	meshSize := len(mesh.Sites)
+	lake1Sites, lake2Sites []core.SiteIndex,
+) []core.SiteIndex {
+	meshSize := core.SiteIndex(len(mesh.Sites))
 
 	// Filter to only sites valid for this mesh
-	lake1Set := make(map[int]bool)
+	lake1Set := make(map[core.SiteIndex]bool)
 	for _, s := range lake1Sites {
 		if s >= 0 && s < meshSize {
 			lake1Set[s] = true
 		}
 	}
 
-	lake2Set := make(map[int]bool)
+	lake2Set := make(map[core.SiteIndex]bool)
 	for _, s := range lake2Sites {
 		if s >= 0 && s < meshSize {
 			lake2Set[s] = true
@@ -367,11 +448,11 @@ func (hm *HydroManager) FindSharedBoundarySites(
 	}
 
 	// Find sites in lake1 that have neighbors in lake2 (and vice versa)
-	sharedSites := make(map[int]bool)
+	sharedSites := make(map[core.SiteIndex]bool)
 
 	for site := range lake1Set {
 		// Bounds check for SiteEdge array
-		if site >= len(mesh.SiteEdge) {
+		if site >= core.SiteIndex(len(mesh.SiteEdge)) {
 			continue
 		}
 		startEdge := mesh.SiteEdge[site]
@@ -414,7 +495,7 @@ func (hm *HydroManager) FindSharedBoundarySites(
 		}
 	}
 
-	result := make([]int, 0, len(sharedSites))
+	result := make([]core.SiteIndex, 0, len(sharedSites))
 	for site := range sharedSites {
 		result = append(result, site)
 	}

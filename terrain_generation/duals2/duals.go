@@ -40,9 +40,9 @@ func BuildHalfEdgeMesh(sites []core.Site, tris []core.Triangle) (*core.DelaunayM
 
 		// Create edges in cycle A->B, B->C, C->A
 		m.HalfEdges = append(m.HalfEdges,
-			core.HalfEdge{Origin: t.A, Tri: ti, Next: e0 + 1, Twin: -1},
-			core.HalfEdge{Origin: t.B, Tri: ti, Next: e0 + 2, Twin: -1},
-			core.HalfEdge{Origin: t.C, Tri: ti, Next: e0 + 0, Twin: -1},
+			core.HalfEdge{Origin: core.SiteIndex(t.A), Tri: ti, Next: e0 + 1, Twin: -1},
+			core.HalfEdge{Origin: core.SiteIndex(t.B), Tri: ti, Next: e0 + 2, Twin: -1},
+			core.HalfEdge{Origin: core.SiteIndex(t.C), Tri: ti, Next: e0 + 0, Twin: -1},
 		)
 
 		// Fill Prev and EdgeDest cache
@@ -69,7 +69,7 @@ func BuildHalfEdgeMesh(sites []core.Site, tris []core.Triangle) (*core.DelaunayM
 		for _, ei := range []int{e0, e0 + 1, e0 + 2} {
 			u := m.HalfEdges[ei].Origin
 			v := m.HalfEdges[ei].EdgeDest
-			k := dirKey{U: u, V: v}
+			k := dirKey{U: int(u), V: int(v)}
 			if _, exists := edgeMap[k]; exists {
 				// This usually indicates duplicate triangles or inconsistent input.
 				// Not always fatal, but it will break traversal.

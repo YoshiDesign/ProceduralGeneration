@@ -4,6 +4,16 @@ import (
 	"math"
 )
 
+type SiteIndex int
+type SideIndex int
+
+const (
+    NORTH_EDGE SideIndex = iota
+    SOUTH_EDGE
+    EAST_EDGE
+    WEST_EDGE
+)
+
 // NoiseParams holds configurable parameters for fractal noise terrain generation.
 type NoiseParams struct {
 	Octaves     int
@@ -84,12 +94,12 @@ type Triangle struct{ A, B, C int }
 // HalfEdge is a directed edge: Origin -> Dest,
 // where Dest is the Origin of Next.
 type HalfEdge struct {
-	Origin   int // site index
+	Origin   SiteIndex // site index
 	Tri      int // triangle index
 	Next     int // half-edge index (within triangle cycle)
 	Twin     int // opposite direction half-edge index, or -1 if boundary
 	Prev     int // (optional) convenient; set during build. Otherwise unused (currently)
-	EdgeDest int // cached dest site (optional, set during build)
+	EdgeDest SiteIndex // cached dest site (optional, set during build)
 }
 
 // DelaunayMesh holds topology + geometry.
@@ -116,7 +126,7 @@ type ChunkCoord struct {
 }
 
 type VoronoiCell struct {
-	Site     int   // site index
+	Site     SiteIndex   // site index
 	Tris     []int // triangles around the site, in order
 	Vertices []Vec2
 	Closed   bool // false if boundary / infinite cell encountered

@@ -113,6 +113,7 @@ func (d *DebugUI) buildUI() *ebitenui.UI {
 	panelContainer.AddChild(d.createFloatSlider("River Max Elev", &d.HydroConfig.RiverSourceMaxElev, 0.0, 20.0, "riverMaxElev"))
 	panelContainer.AddChild(d.createFloatSlider("River Prob", &d.HydroConfig.RiverSourceProbability, 0.0, 1.0, "riverProb"))
 	panelContainer.AddChild(d.createFloatSlider("Lake Prob", &d.HydroConfig.LakeProbability, 0.0, 1.0, "lakeProb"))
+	panelContainer.AddChild(d.createFloatSlider("Lake Min Depth", &d.HydroConfig.LakeMinDepth, 0.0, 10.0, "lakeMinDepth"))
 	panelContainer.AddChild(d.createFloatSlider("Ocean Prob", &d.HydroConfig.OceanProbability, 0.0, 1.0, "oceanProb"))
 
 	// Instructions

@@ -9,7 +9,6 @@ const (
 	SourceSpring                     // Underground spring (future)
 )
 
-
 // ChunkHydroData holds all hydrology information for a single chunk.
 type ChunkHydroData struct {
 	Rivers []RiverSegment
@@ -21,23 +20,23 @@ type ChunkHydroData struct {
 	RiverExits   []RiverInterPoint // Rivers exiting to neighbors
 
 	// Cross-chunk coordination for lakes
-	LakeEntries []LakeBoundaryPoint // Lakes entering from neighbors
-	LakeExits   []LakeBoundaryPoint // Lakes exiting to neighbors
+	LakeEntries []LakeInterPoint // Lakes entering from neighbors
+	LakeExits   []LakeInterPoint // Lakes exiting to neighbors
 }
 
-// LakeBoundaryPoint stores information about a lake crossing a chunk boundary.
+// LakeInterPoint stores information about a lake crossing a chunk boundary.
 // This enables cross-chunk lake continuity.
-type LakeBoundaryPoint struct {
+type LakeInterPoint struct {
 	LakeID      int        // Global lake ID
 	WaterLevel  float64    // Current water level (may be provisional)
 	Position    Vec2       // World position at boundary
-	SiteIndex   int        // Site index in source chunk's mesh
-	EdgeIndex   int        // Which edge: 0=minX, 1=maxX, 2=minZ, 3=maxZ
+	SiteIndex   SiteIndex        // Site index in source chunk's mesh
+	Side	    SideIndex        // Which edge: 0=minX, 1=maxX, 2=minZ, 3=maxZ
 	SourceChunk ChunkCoord // Chunk this boundary came from
 }
 
 // ChunkBounds represents the bounds of a chunk for boundary detection.
-type ChunkBounds struct {
+type ChunkBoundaryBox struct {
 	MinX, MinZ, MaxX, MaxZ float64
 }
 
@@ -60,7 +59,7 @@ type HydroBodyRef struct {
 type Lake struct {
 	ID          int
 	CenterPos   Vec2      // Approximate center of the lake
-	SiteIndices []int     // Mesh vertex indices within the lake
+	SiteIndices []SiteIndex     // Mesh vertex indices within the lake
 	WaterLevel  float64   // Surface elevation (Y)
 	MinDepth    float64   // Deepest point below water level
 	Spillway    *Vec2     // Outlet point (nil if endorheic/closed basin)

@@ -1,7 +1,5 @@
 package core
 
-import "math"
-
 // SpatialGrid provides O(1) point location for height queries on a Delaunay mesh.
 type SpatialGrid struct {
 	Mesh     *DelaunayMesh
@@ -23,7 +21,7 @@ func (sg *SpatialGrid) LocateTriangle(x, z float64) (int, bool) {
 	}
 
 	// Find the cell
-	cx := int((x - sg.MinX) / sg.CellSize)
+	cx := int((x - sg.MinX) / sg.CellSize) // Note: int() will floor
 	cz := int((z - sg.MinZ) / sg.CellSize)
 
 	// Out of bounds check
@@ -31,6 +29,7 @@ func (sg *SpatialGrid) LocateTriangle(x, z float64) (int, bool) {
 		return -1, false
 	}
 
+	// row * width + offset (everyone's favorite formula)
 	cellIdx := cz*sg.GridW + cx
 	candidates := sg.Cells[cellIdx]
 
@@ -69,23 +68,10 @@ func (sg *SpatialGrid) SampleHeight(x, z float64) (float64, bool) {
 
 	p := Vec2{x, z}
 	t := sg.Mesh.Tris[ti]
-	a := sg.Mesh.Sites[t.A].Pos
-	b := sg.Mesh.Sites[t.B].Pos
-	c := sg.Mesh.Sites[t.C].Pos
-
-	// Compute barycentric weights - Using `a` as our fixed point
-	v0 := b.Sub(a)
-	v1 := c.Sub(a)
-	v2 := p.Sub(a)
-
-	denom := cross2(v0, v1)
-	if math.Abs(denom) < 1e-12 {
+	wa, wb, wc, ok := sg.Mesh.Barycentric(ti, p)
+	if !ok {
 		return 0, false
 	}
-
-	wb := cross2(v2, v1) / denom // Area of triangle APC / area of ABC
-	wc := cross2(v0, v2) / denom // Area of triangle ABP / area of ABC
-	wa := 1.0 - wb - wc			 // Whatever remains
 
 	// Discreet samples
 	ha := sg.Heights[t.A]
