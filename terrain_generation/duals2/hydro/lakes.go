@@ -113,14 +113,97 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 		return nil, nil
 	}
 
-	minHeight := heights[minimum]
+	lake, boundarySites, filled, spillwayHeight, spillway := hm.CreateLake(mesh, heights, minimum, chunkBounds, sourceChunk, existingLakeID)
+
+	if lake == nil {
+		return nil, nil
+	}
+
+	// Water level reconciliation: if continuing an existing lake and found a lower spillway,
+	// update the global lake's water level
+	if existingLakeID != -1 {
+		if existingLake, exists := hm.Lakes[existingLakeID]; exists {
+			if spillwayHeight < existingLake.WaterLevel {
+				// Found a lower spillway in this chunk - update global lake
+				hm.UpdateLakeWaterLevel(existingLakeID, spillwayHeight)
+			}
+		}
+	}
+
+	if spillway != nil {
+		sp := mesh.Sites[*spillway].Pos
+		lake.Spillway = &sp
+
+		// Calculate spillway direction (away from lake center)
+		lake.SpillwayDir = sp.Sub(lake.CenterPos).Normalize()
+
+		// Also update the global lake's spillway if this is a continuation
+		if existingLakeID != -1 {
+			if existingLake, exists := hm.Lakes[existingLakeID]; exists {
+				if spillwayHeight <= existingLake.WaterLevel {
+					existingLake.Spillway = &sp
+					existingLake.SpillwayDir = lake.SpillwayDir
+				}
+			}
+		}
+	}
+
+	// Create boundary points for sites near chunk edges
+	var boundaryPoints []core.LakeInterPoint
+	for siteIdx, side := range boundarySites {
+		if filled[siteIdx] {
+			pos := mesh.Sites[siteIdx].Pos
+			boundaryPoints = append(boundaryPoints, core.LakeInterPoint{
+				LakeID:      lake.ID,
+				WaterLevel:  spillwayHeight,
+				Position:    pos,
+				SiteIndex:   siteIdx,
+				Side:   	 side,
+				SourceChunk: sourceChunk,
+			})
+		}
+	}
+
+	// Mark all lake sites in the global tracker
+	for site := range filled {
+		hm.MarkLakeSite(sourceChunk, site, lake.ID)
+	}
+
+	// Register lake globally if new, or update existing lake
+	if existingLakeID == -1 {
+		hm.Lakes[lake.ID] = lake
+
+	} else {
+		// Update existing lake with new sites
+		if existingLake, exists := hm.Lakes[existingLakeID]; exists {
+			existingLake.SiteIndices = append(existingLake.SiteIndices, lake.SiteIndices...)
+			// Update depth if this chunk has a deeper point
+			if lake.MinDepth > existingLake.MinDepth {
+				existingLake.MinDepth = lake.MinDepth
+			}
+		}
+	}
+
+	return lake, boundaryPoints
+}
+
+func (hm *HydroManager) CreateLake (
+	mesh *core.DelaunayMesh, 
+	heights []float64, 
+	minimum core.SiteIndex, 
+	chunkBounds core.ChunkBoundaryBox, 
+	sourceChunk core.ChunkCoord, 
+	existingLakeID int) (*core.Lake, map[core.SiteIndex]core.SideIndex, map[core.SiteIndex]bool, float64, *core.SiteIndex) {
+
+	var spillway *core.SiteIndex
 
 	// Find all connected vertices below the spillway level
 	filled := make(map[core.SiteIndex]bool)
 	frontier := []core.SiteIndex{minimum} // Site indices 1D
 	filled[minimum] = true // tracking filled sites
 
-	var spillway *core.SiteIndex
+	minHeight := heights[minimum]
+
 	spillwayHeight := math.Inf(1)
 
 	// If continuing an existing lake, use its water level as initial spillway
@@ -203,7 +286,7 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 
 					if canFill {
 						filled[dest] = true
-						frontier = append(frontier, dest)
+						frontier = append(frontier, dest) // Next in line for lake expansion
 					} else {
 						// Potential spillway - this site blocks expansion
 						if destHeight < spillwayHeight {
@@ -227,13 +310,13 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 
 	// Check if lake meets minimum requirements
 	if len(filled) < hm.Cfg.LakeMinArea {
-		return nil, nil
+		return nil, nil, nil, spillwayHeight, nil
 	}
 
 	// Calculate lake properties
 	siteIndices := make([]core.SiteIndex, 0, len(filled))
 	var centerX, centerZ float64
-	maxDepth := 0.0
+	minDepth := 0.0
 
 	for site := range filled {
 		siteIndices = append(siteIndices, site)
@@ -241,8 +324,8 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 		centerX += pos.X
 		centerZ += pos.Y
 		depth := spillwayHeight - heights[site]
-		if depth > maxDepth {
-			maxDepth = depth
+		if depth > minDepth { 
+			minDepth = depth
 		}
 	}
 
@@ -256,80 +339,13 @@ func (hm *HydroManager) FloodFillLakeWithBoundaries(
 		hm.NextLakeID++
 	}
 
-	// Water level reconciliation: if continuing an existing lake and found a lower spillway,
-	// update the global lake's water level
-	if existingLakeID != -1 {
-		if existingLake, exists := hm.Lakes[existingLakeID]; exists {
-			if spillwayHeight < existingLake.WaterLevel {
-				// Found a lower spillway in this chunk - update global lake
-				hm.UpdateLakeWaterLevel(existingLakeID, spillwayHeight)
-			}
-		}
-	}
-
-	lake := &core.Lake{
+	return &core.Lake{
 		ID:          lakeID,
 		CenterPos:   core.Vec2{X: centerX, Y: centerZ},
 		SiteIndices: siteIndices,
 		WaterLevel:  spillwayHeight,
-		MinDepth:    maxDepth,
-	}
-
-	if spillway != nil {
-		sp := mesh.Sites[*spillway].Pos
-		lake.Spillway = &sp
-
-		// Calculate spillway direction (away from lake center)
-		lake.SpillwayDir = sp.Sub(lake.CenterPos).Normalize()
-
-		// Also update the global lake's spillway if this is a continuation
-		if existingLakeID != -1 {
-			if existingLake, exists := hm.Lakes[existingLakeID]; exists {
-				if spillwayHeight <= existingLake.WaterLevel {
-					existingLake.Spillway = &sp
-					existingLake.SpillwayDir = lake.SpillwayDir
-				}
-			}
-		}
-	}
-
-	// Create boundary points for sites near chunk edges
-	var boundaryPoints []core.LakeInterPoint
-	for siteIdx, side := range boundarySites {
-		if filled[siteIdx] {
-			pos := mesh.Sites[siteIdx].Pos
-			boundaryPoints = append(boundaryPoints, core.LakeInterPoint{
-				LakeID:      lakeID,
-				WaterLevel:  spillwayHeight,
-				Position:    pos,
-				SiteIndex:   siteIdx,
-				Side:   	 side,
-				SourceChunk: sourceChunk,
-			})
-		}
-	}
-
-	// Mark all lake sites in the global tracker
-	for site := range filled {
-		hm.MarkLakeSite(sourceChunk, site, lakeID)
-	}
-
-	// Register lake globally if new, or update existing lake
-	if existingLakeID == -1 {
-		hm.Lakes[lakeID] = lake
-
-	} else {
-		// Update existing lake with new sites
-		if existingLake, exists := hm.Lakes[existingLakeID]; exists {
-			existingLake.SiteIndices = append(existingLake.SiteIndices, siteIndices...)
-			// Update depth if this chunk has a deeper point
-			if maxDepth > existingLake.MinDepth {
-				existingLake.MinDepth = maxDepth
-			}
-		}
-	}
-
-	return lake, boundaryPoints
+		MinDepth:    minDepth,
+	}, boundarySites, filled, spillwayHeight, spillway
 }
 
 // HandleLakeOverlap determines whether to merge two overlapping lakes or create a watershed divide.

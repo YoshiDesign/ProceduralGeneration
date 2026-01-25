@@ -345,7 +345,7 @@ func (cm *ChunkManager) getOrGeneratePoints(coord core.ChunkCoord) []core.Vec2 {
 	}
 
 	// Optional sanity check. Check the chunk directly for the points
-	// This will never happen under normal circumstances. Caching points is an invariant to generating blue noise.
+	// This will never happen under normal circumstances. Caching neighboring points affords us some invariants
 	if chunk, ok := cm.cache[coord]; ok {
 		points := make([]core.Vec2, len(chunk.Mesh.Sites))
 		for i, site := range chunk.Mesh.Sites {
@@ -385,8 +385,8 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainCh
 	chunk := &TerrainChunk{
 		Coord: coord,
 		Cfg:   cm.cfg,
-		MinX:  float64(coord.X) * cm.cfg.ChunkSize,
-		MinZ:  float64(coord.Z) * cm.cfg.ChunkSize,
+		MinX:  float64(coord.X) * cm.cfg.ChunkSize, // world-space coordinate / world units per chunk side
+		MinZ:  float64(coord.Z) * cm.cfg.ChunkSize, 
 		MaxX:  float64(coord.X+1) * cm.cfg.ChunkSize,
 		MaxZ:  float64(coord.Z+1) * cm.cfg.ChunkSize,
 	}
@@ -413,6 +413,7 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainCh
 			h = cm.heightFunc(p.X, p.Y, np.Octaves, np.Frequency, np.Amplitude, np.Persistence, np.Lacunarity)
 		}
 		sites[i] = core.Site{Pos: p, Height: h}
+		fmt.Println("site", i, "height", h)
 		heights[i] = h
 	}
 	chunk.Heights = heights
@@ -759,8 +760,8 @@ func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
 	halo := cm.cfg.HaloWidth
 
 	// We'll collect points from multiple regions
-	allPoints := make([]core.Vec2, 0, 1024)
-	seen := make(map[uint64]struct{}, 1024)
+	allPoints := make([]core.Vec2, 0, 1024) // 1024 pre-allocated points
+	seen := make(map[uint64]struct{}, 1024) // 1024 pre-allocated seen points
 
 	// Hash a point to detect duplicates (within tolerance)
 	hashPoint := func(p core.Vec2) uint64 {
@@ -808,24 +809,30 @@ func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
 		nMaxZ := float64(neighbor.Z+1) * cm.cfg.ChunkSize
 
 		// Compute the overlap region between our extended bounds and neighbor's core
-		overlapMinX := max(minX-halo, nMinX)
+		overlapMinX := max(minX-halo, nMinX) // Hmm... I don't think nMinX will ever be less than minX-halo
 		overlapMinZ := max(minZ-halo, nMinZ)
 		overlapMaxX := min(maxX+halo, nMaxX)
 		overlapMaxZ := min(maxZ+halo, nMaxZ)
 
+		// Big ol' wtf right here
 		if overlapMinX >= overlapMaxX || overlapMinZ >= overlapMaxZ {
 			continue // No overlap
 		}
 
-		// Get neighbor's points (from chunk cache, points cache, or generate + cache)
-		neighborPoints := cm.getOrGeneratePoints(neighbor)
+		// Get neighbor's core points (from chunk cache, points cache, or generate + cache)
+		coreNeighborPoints := cm.getOrGeneratePoints(neighbor)
 
+		/*
+			[Optimization]
+			Definitely a spot that can be optimized by caching the padded boundary within each chunk
+			that represents the halo region of neighboring chunks
+		*/
 		// Filter to points within our halo region but outside our core
-		for _, p := range neighborPoints {
+		for _, p := range coreNeighborPoints {
 			inHalo := (p.X >= minX-halo && p.X < maxX+halo && p.Y >= minZ-halo && p.Y < maxZ+halo)
 			inCore := (p.X >= minX && p.X < maxX && p.Y >= minZ && p.Y < maxZ)
 			if inHalo && !inCore {
-				addPoint(p)
+				addPoint(p) // Add neighboring blue-noise to boundary points for the current chunk being processed
 			}
 		}
 	}

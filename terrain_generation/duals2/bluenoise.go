@@ -55,9 +55,9 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 	points := make([]core.Vec2, 0, gridW*gridH/4)
 	active := make([]int, 0, 128)
 
-	// Helper: convert world coords to grid cell
+	// Helper: convert world coords to a local grid cell
 	toGrid := func(p core.Vec2) (int, int) {
-		gx := int((p.X - minX) / cellSize)
+		gx := int((p.X - minX) / cellSize) 
 		gz := int((p.Y - minZ) / cellSize)
 		// Clamp to valid range
 		if gx < 0 {
@@ -107,19 +107,19 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 		idx := len(points)
 		points = append(points, p)
 		active = append(active, idx)
-		gx, gz := toGrid(p)
-		grid[gz*gridW+gx] = idx
+		gx, gz := toGrid(p) // The grid cell this point belongs to
+		grid[gz*gridW+gx] = idx // Store the index of this point in the 1D array (grid)
 	}
 
 	// Start with a random initial point
-	startX := minX + rng.Float64()*width
+	startX := minX + rng.Float64()*width // somewhere between min and a fraction of max
 	startZ := minZ + rng.Float64()*height
 	insert(core.Vec2{X: startX, Y: startZ})
 
 	// Main loop
 	for len(active) > 0 {
 		// Pick a random active point
-		ai := rng.Intn(len(active))
+		ai := rng.Intn(len(active)) // Always 0 on first iteration
 		pi := active[ai]
 		p := points[pi]
 
@@ -127,7 +127,7 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 		for k := 0; k < cfg.MaxTries; k++ {
 			// Generate a random point in the annulus [r, 2r] around p
 			angle := rng.Float64() * 2 * math.Pi
-			dist := cfg.MinDist + rng.Float64()*cfg.MinDist
+			dist := cfg.MinDist + rng.Float64()*cfg.MinDist // min dist plus a fraction of the min dist
 			candidate := core.Vec2{
 				X: p.X + dist*math.Cos(angle),
 				Y: p.Y + dist*math.Sin(angle),

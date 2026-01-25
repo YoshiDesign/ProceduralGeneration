@@ -30,7 +30,8 @@ func BuildSpatialGrid(mesh *core.DelaunayMesh, heights []float64, cellSize, minX
 	sg := &core.SpatialGrid{
 		Mesh:     mesh,
 		Heights:  heights,
-		CellSize: cellSize,
+		CellSize: cellSize, // make sure SpatialGrid.CellSize is tuned appropriately
+		// A good heuristic is 2-4x your average triangle edge length, but it depends on your query patterns.
 		MinX:     minX,
 		MinZ:     minZ,
 		MaxX:     maxX,
