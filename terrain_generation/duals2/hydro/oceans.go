@@ -15,7 +15,14 @@ type OceanSeedPoint struct {
 	ChunkZ int
 	Seed   int64
 }
-
+// combineSeeds creates a deterministic seed from multiple values.
+func combineSeeds(a, b, c int64) int64 {
+	// Simple hash combination
+	h := a
+	h = h*31 + b
+	h = h*31 + c
+	return h
+}
 // GenerateOceanRegion creates an ocean region starting from a seed chunk.
 // The ocean expands from the seed up to the configured maximum size.
 func (hm *HydroManager) GenerateOceanRegion(seedChunk core.ChunkCoord, worldSeed int64) *core.OceanRegion {

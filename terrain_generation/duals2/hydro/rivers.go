@@ -29,7 +29,7 @@ func (hm *HydroManager) FindRiverSources(
 		// TODO - This prevents sources in basins. See docs
 		// Check if this is a local maximum or near-maximum
 		// (sources shouldn't be in valleys)
-		if !isNearLocalMaximum(mesh, heights, site) {
+		if !core.IsNearLocalMaximum(mesh, heights, site) {
 			continue
 		}
 
@@ -117,7 +117,7 @@ func (hm *HydroManager) TraceRiver(
 		}
 
 		// Find neighbors with lower elevation
-		neighbors := getLowerNeighbors(mesh, hm.Cfg, heights, current)
+		neighbors := core.GetLowerNeighbors(mesh, hm.Cfg.RiverMinSlope, heights, current)
 		if len(neighbors) == 0 {
 			// Local minimum - potential lake site
 			break
@@ -226,7 +226,7 @@ func (hm *HydroManager) TraceRiverV2(
 		bias := hm.Cfg.FlowBias(pos.Y) // pos.Y is Z in world space
 
 		// Find neighbors with lower elevation
-		neighbors := getFlowBiasedNeighbors(mesh, current, bias)
+		neighbors := core.GetFlowBiasedNeighbors(mesh, current, bias)
 		if len(neighbors) == 0 {
 			// Local minimum - potential lake site
 			break

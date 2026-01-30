@@ -5,7 +5,7 @@ import (
 )
 
 type SiteIndex int
-type SideIndex int
+type SideIndex int //
 
 const (
     NORTH_EDGE SideIndex = iota
