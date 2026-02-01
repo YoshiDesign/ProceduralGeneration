@@ -89,7 +89,7 @@ func (s Site) Pos3D() Vec3 {
 }
 
 // Triangle references 3 site indices in CCW order (recommended).
-type Triangle struct{ A, B, C int }
+type Triangle struct{ A, B, C SiteIndex }
 
 // HalfEdge is a directed edge: Origin -> Dest,
 // where Dest is the Origin of Next.

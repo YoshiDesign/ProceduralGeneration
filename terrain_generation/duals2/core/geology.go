@@ -61,7 +61,6 @@ func IsLocalMinimum(mesh *DelaunayMesh, heights []float64, site SiteIndex) bool 
 	return true
 }
 
-
 func GetLowerNeighbors(mesh *DelaunayMesh, slopeThreshold float64, heights []float64, site SiteIndex) []SiteIndex {
 	neighbors := make([]SiteIndex, 0, 8)
 	currentHeight := heights[site]
@@ -133,7 +132,7 @@ func GetFlowBiasedNeighbors(mesh *DelaunayMesh, site SiteIndex, bias Vec2) []Sit
 		destPos := mesh.Sites[dest].Pos
 		destVec := destPos.Sub(currentPos)
 		destDist := destVec.Len()
-		if destDist < 1e-9 {
+		if destDist < 1e-9 { // Impossible
 			continue
 		}
 		destDir := destVec.Mul(1.0 / destDist)

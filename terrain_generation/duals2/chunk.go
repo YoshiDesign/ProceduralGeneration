@@ -6,78 +6,26 @@ import (
 	"hash/fnv"
 	"os"
 	"procedural_generation/terrain_generation/duals2/core"
+	eros "procedural_generation/terrain_generation/duals2/erosion"
 	"procedural_generation/terrain_generation/duals2/hydro"
 	"time"
 
 	"sync"
-
-	"github.com/hajimehoshi/ebiten/v2"
 )
 
 // ChunkManager manages chunk generation and caching for optimized neighbor lookups.
 type ChunkManager struct {
 	mu          sync.RWMutex
-	cache       map[core.ChunkCoord]*TerrainChunk
+	cache       map[core.ChunkCoord]*core.TerrainChunk
 	pointsCache map[core.ChunkCoord][]core.Vec2 // Raw blue noise points (before full chunk is built)
-	cfg         ChunkConfig
+	cfg         core.ChunkConfig
 	noiseParams core.NoiseParams
 	heightFunc  func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64
+	chunkSeeds  map[core.ChunkCoord]int64
 
 	// Hydrology system
 	hydroMgr *hydro.HydroManager
-}
-
-// TerrainChunk represents a generated terrain chunk with mesh data.
-type TerrainChunk struct {
-	Coord core.ChunkCoord
-	Cfg   ChunkConfig
-
-	// Core bounds (what this chunk "owns")
-	MinX, MinZ float64
-	MaxX, MaxZ float64
-
-	// The Delaunay mesh (includes halo points for boundary continuity)
-	Mesh *core.DelaunayMesh
-
-	// Height values per site (parallel to Mesh.Sites)
-	Heights []float64
-
-	// Watershed divide weights per site (parallel to Mesh.Sites)
-	// 0.0 = normal terrain, 1.0 = full watershed divide
-	// Used by vertex shader to elevate terrain at lake boundaries
-	WatershedWeights []float64
-
-	// Face normals per triangle (parallel to Mesh.Tris)
-	FaceNormals []core.Vec3
-
-	// Spatial index for fast point location
-	Spatial *core.SpatialGrid
-
-	// Which sites are in the core region (not halo)
-	CoreSiteIndices []core.SiteIndex
-
-	// Hydrology data
-	Hydro *core.ChunkHydroData
-
-	// Pre-computed render data for batched drawing
-	RenderVertices []ebiten.Vertex
-	RenderIndices  []uint16
-
-	// Pre-computed hydrology render data
-	LakeVertices  []ebiten.Vertex
-	LakeIndices   []uint16
-	OceanVertices []ebiten.Vertex
-	OceanIndices  []uint16
-}
-
-// ChunkConfig holds parameters for terrain chunk generation.
-type ChunkConfig struct {
-	ChunkSize    float64 // World units per chunk side (e.g., 256.0)
-	MinPointDist float64 // Minimum distance between blue noise points
-	HaloWidth    float64 // Boundary overlap region width (typically = MinPointDist)
-	WorldSeed    int64   // Global world seed
-	ChunksX      int     // Number of chunks along the X axis
-	ChunksZ      int     // Number of chunks along the Z axis
+	erosMgr *eros.ErosionManager
 }
 
 // DefaultNoiseParams returns sensible defaults for terrain noise generation.
@@ -92,8 +40,8 @@ func DefaultNoiseParams() core.NoiseParams {
 }
 
 // DefaultChunkConfig returns sensible defaults for a terrain chunk.
-func DefaultChunkConfig() ChunkConfig {
-	return ChunkConfig{
+func DefaultChunkConfig() core.ChunkConfig {
+	return core.ChunkConfig{
 		ChunkSize:    128.0,
 		MinPointDist: 8.0,
 		HaloWidth:    8.0,
@@ -104,9 +52,9 @@ func DefaultChunkConfig() ChunkConfig {
 }
 
 // NewChunkManager creates a new chunk manager with the given configuration.
-func NewChunkManager(cfg ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
+func NewChunkManager(cfg core.ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
 	return &ChunkManager{
-		cache:       make(map[core.ChunkCoord]*TerrainChunk),
+		cache:       make(map[core.ChunkCoord]*core.TerrainChunk),
 		pointsCache: make(map[core.ChunkCoord][]core.Vec2),
 		cfg:         cfg,
 		noiseParams: DefaultNoiseParams(),
@@ -152,7 +100,7 @@ func (cm *ChunkManager) SetHydroConfig(cfg hydro.HydroConfig) {
 func (cm *ChunkManager) ClearCaches() {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	cm.cache = make(map[core.ChunkCoord]*TerrainChunk)
+	cm.cache = make(map[core.ChunkCoord]*core.TerrainChunk)
 	cm.pointsCache = make(map[core.ChunkCoord][]core.Vec2)
 }
 
@@ -160,7 +108,7 @@ func (cm *ChunkManager) ClearCaches() {
 
 // GetOrGenerate returns a cached chunk or generates and caches a new one.
 // This is the primary API for chunk access with caching optimization.
-func (cm *ChunkManager) GetOrGenerate(coord core.ChunkCoord) (*TerrainChunk, error) {
+func (cm *ChunkManager) GetOrGenerate(coord core.ChunkCoord) (*core.TerrainChunk, error) {
 	// Fast path: check if already cached
 	cm.mu.RLock()
 	if chunk, ok := cm.cache[coord]; ok {
@@ -187,96 +135,41 @@ func (cm *ChunkManager) GetOrGenerate(coord core.ChunkCoord) (*TerrainChunk, err
 	return chunk, nil
 }
 
-// Get returns a cached chunk without generating. Returns nil if not cached.
-func (cm *ChunkManager) Get(coord core.ChunkCoord) *TerrainChunk {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return cm.cache[coord]
-}
+// // Get returns a cached chunk without generating. Returns nil if not cached.
+// func (cm *ChunkManager) Get(coord core.ChunkCoord) *TerrainChunk {
+// 	cm.mu.RLock()
+// 	defer cm.mu.RUnlock()
+// 	return cm.cache[coord]
+// }
 
-// Evict removes a chunk from the cache, freeing memory.
-func (cm *ChunkManager) Evict(coord core.ChunkCoord) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	delete(cm.cache, coord)
-}
+// // Evict removes a chunk from the cache, freeing memory.
+// func (cm *ChunkManager) Evict(coord core.ChunkCoord) {
+// 	cm.mu.Lock()
+// 	defer cm.mu.Unlock()
+// 	delete(cm.cache, coord)
+// }
 
-// EvictOutsideRadius removes all chunks outside the given radius from center.
-func (cm *ChunkManager) EvictOutsideRadius(center core.ChunkCoord, radius int) int {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+// // EvictOutsideRadius removes all chunks outside the given radius from center.
+// func (cm *ChunkManager) EvictOutsideRadius(center core.ChunkCoord, radius int) int {
+// 	cm.mu.Lock()
+// 	defer cm.mu.Unlock()
 
-	evicted := 0
-	for coord := range cm.cache {
-		dx := coord.X - center.X
-		dz := coord.Z - center.Z
-		if dx*dx+dz*dz > radius*radius {
-			delete(cm.cache, coord)
-			evicted++
-		}
-	}
-	return evicted
-}
-
-// CacheSize returns the number of cached chunks.
-func (cm *ChunkManager) CacheSize() int {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return len(cm.cache)
-}
-
-// CachedCoords returns all cached chunk coordinates.
-func (cm *ChunkManager) CachedCoords() []core.ChunkCoord {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	coords := make([]core.ChunkCoord, 0, len(cm.cache))
-	for coord := range cm.cache {
-		coords = append(coords, coord)
-	}
-	return coords
-}
-
-// getOrGeneratePoints returns blue noise points for a chunk, using caches when available.
-// Priority: 1) Full chunk cache (Mesh.core.Sites), 2) Points cache, 3) Generate new.
-// Caller must hold at least a read lock on cm.mu.
-// If generation is needed, caller should hold a write lock.
-func (cm *ChunkManager) getOrGeneratePoints(coord core.ChunkCoord) []core.Vec2 {
-
-	// Check if points are cached.
-	if pts, ok := cm.pointsCache[coord]; ok {
-		return pts
-	}
-
-	// Optional sanity check. Check the chunk directly for the points
-	// This will never happen under normal circumstances. Caching neighboring points affords us some invariants
-	if chunk, ok := cm.cache[coord]; ok {
-		points := make([]core.Vec2, len(chunk.Mesh.Sites))
-		for i, site := range chunk.Mesh.Sites {
-			points[i] = site.Pos
-		}
-
-		return points
-	}
-
-	// 3. Generate blue noise and cache it
-	minX := float64(coord.X) * cm.cfg.ChunkSize
-	minZ := float64(coord.Z) * cm.cfg.ChunkSize
-	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
-	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
-
-	blueCfg := DefaultBlueNoiseConfig(cm.cfg.MinPointDist)
-	seed := chunkSeed(cm.cfg.WorldSeed, coord)
-	pts := GenerateBlueNoiseSeeded(seed, minX, minZ, maxX, maxZ, blueCfg)
-
-	// Cache the generated points
-	cm.pointsCache[coord] = pts
-	return pts
-}
+// 	evicted := 0
+// 	for coord := range cm.cache {
+// 		dx := coord.X - center.X
+// 		dz := coord.Z - center.Z
+// 		if dx*dx+dz*dz > radius*radius {
+// 			delete(cm.cache, coord)
+// 			evicted++
+// 		}
+// 	}
+// 	return evicted
+// }
 
 // generateChunkInternal creates a terrain chunk using the ChunkManager's caches.
 // Caller must hold a write lock on cm.mu.
-func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainChunk, error) {
-	chunk := &TerrainChunk{
+func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.TerrainChunk, error) {
+	chunk := &core.TerrainChunk{
 		Coord: coord,
 		Cfg:   cm.cfg,
 		MinX:  float64(coord.X) * cm.cfg.ChunkSize, // world-space coordinate / world units per chunk side
@@ -290,6 +183,7 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainCh
 
 	// Track which points are in the core region
 	coreIndices := make([]core.SiteIndex, 0, len(allPoints))
+	// TODO - This might be able to occur sooner, during generateChunkPoints
 	for i, p := range allPoints {
 		if p.X >= chunk.MinX && p.X < chunk.MaxX && p.Y >= chunk.MinZ && p.Y < chunk.MaxZ {
 			coreIndices = append(coreIndices, core.SiteIndex(i))
@@ -302,19 +196,15 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainCh
 	heights := make([]float64, len(allPoints))
 	np := cm.noiseParams
 	for i, p := range allPoints {
-		// IMPORTANT: This might be doubling up on height calc's for neighbors since it includes the halo region
+		// This includes the halo region
 		h := 0.0
 		if cm.heightFunc != nil {
 			h = cm.heightFunc(p.X, p.Y, np.Octaves, np.Frequency, np.Amplitude, np.Persistence, np.Lacunarity)
 		}
 		sites[i] = core.Site{Pos: p, Height: h}
-		fmt.Println("site", i, "height", h)
 		heights[i] = h
 	}
 	chunk.Heights = heights
-
-	// Initialize watershed weights to 0.0 (no watershed modification)
-	chunk.WatershedWeights = make([]float64, len(allPoints))
 
 	// Build Delaunay triangulation
 	tris := core.Triangulate(allPoints)
@@ -335,14 +225,162 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*TerrainCh
 
 	// chunk.Erosion = cm.GenerateChunkErosion(chunk)
 
+	// Initialize watershed weights to 0.0 (no watershed modification)
+	chunk.WatershedWeights = make([]float64, len(allPoints))
+
+	// Generate erosion height deltas on the erosion manager for this chunk
+	cm.erosMgr.HydraulicErosion(chunk, chunk.Spatial)
+
 	// Generate hydrology data
 	chunk.Hydro = cm.generateChunkHydrology(chunk)
 
 	return chunk, nil
 }
 
+// generateChunkPoints generates blue noise points for a chunk including halo regions.
+// Uses the point cache to avoid redundant blue noise generation for neighbors.
+// Caller must hold a write lock on cm.mu.
+func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
+
+	// core.ChunkCoord (0, 1)
+	// e.g. 1 * 128.0 = 128.0
+	minX := float64(coord.X) * cm.cfg.ChunkSize
+	minZ := float64(coord.Z) * cm.cfg.ChunkSize
+	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
+	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
+
+	// fmt.Printf(
+	// 	"[2] info-------------\n ChunkSize\t%v\ncoord.X\t%v\ncoord.Z\t%v\nmin:\t(%v, %v)\nmax:(%v, %v)\n---------------\n", 
+	// 	cm.cfg.ChunkSize, coord.X, coord.Z, minX, minZ, maxX, maxZ)
+
+	halo := cm.cfg.HaloWidth
+
+	// We'll collect points from multiple regions
+	allPoints := make([]core.Vec2, 0, 1024) // 1024 pre-allocated points
+	seen := make(map[uint64]struct{}, 1024) // 1024 pre-allocated seen points
+
+	// Hash a point to detect duplicates (within tolerance)
+	hashPoint := func(p core.Vec2) uint64 {
+		// Quantize to half the min distance for dedup
+		scale := 2.0 / cm.cfg.MinPointDist
+		qx := int64(p.X * scale)
+		qz := int64(p.Y * scale)
+
+		// Create a bitmask for this point
+		return uint64(qx)<<32 | uint64(qz)&0xFFFFFFFF
+	}
+
+	addPoint := func(p core.Vec2) bool {
+		h := hashPoint(p)
+		if _, exists := seen[h]; !exists {
+			seen[h] = struct{}{}
+			allPoints = append(allPoints, p)
+			return true
+		}
+		return false
+	}
+
+	addPoints := func(pts []core.Vec2) {
+		for _, p := range pts {
+			addPoint(p)
+		}
+	}
+
+	// 1. Get or generate core points for this chunk (uses cache if available)
+	corePoints := cm.getOrGeneratePoints(coord)
+	addPoints(corePoints)
+
+	// 2. Plot the neighboring chunk coordinates for this chunk
+	neighbors := []core.ChunkCoord{
+		{X: coord.X - 1, Z: coord.Z - 1}, {X: coord.X, Z: coord.Z - 1}, {X: coord.X + 1, Z: coord.Z - 1},
+		{X: coord.X - 1, Z: coord.Z}, {X: coord.X + 1, Z: coord.Z},
+		{X: coord.X - 1, Z: coord.Z + 1}, {X: coord.X, Z: coord.Z + 1}, {X: coord.X + 1, Z: coord.Z + 1},
+	}
+
+	// 3 Generate all neighboring chunk points and add them to the allPoints list
+	for _, neighbor := range neighbors {
+		// The boundary region is where this chunk's halo overlaps the neighbor (world-space coordinates)
+		nMinX := float64(neighbor.X) * cm.cfg.ChunkSize
+		nMinZ := float64(neighbor.Z) * cm.cfg.ChunkSize
+		nMaxX := float64(neighbor.X+1) * cm.cfg.ChunkSize
+		nMaxZ := float64(neighbor.Z+1) * cm.cfg.ChunkSize
+
+		// Compute the overlap region between our extended bounds and neighbor's core
+		overlapMinX := max(minX-halo, nMinX) // Hmm... I don't think nMinX will ever be less than minX-halo
+		overlapMinZ := max(minZ-halo, nMinZ)
+		overlapMaxX := min(maxX+halo, nMaxX)
+		overlapMaxZ := min(maxZ+halo, nMaxZ)
+
+		// Big ol' wtf right here
+		if overlapMinX >= overlapMaxX || overlapMinZ >= overlapMaxZ {
+			continue // No overlap
+		}
+
+		// Get neighbor's core points (from chunk cache, points cache, or generate + cache)
+		coreNeighborPoints := cm.getOrGeneratePoints(neighbor)
+
+		/*
+			[Optimization]
+			Definitely a spot that can be optimized by caching the padded boundary within each chunk
+			that represents the halo region of neighboring chunks
+		*/
+		// Filter to points within our halo region but outside our core
+		for _, p := range coreNeighborPoints {
+			inHalo := (p.X >= minX-halo && p.X < maxX+halo && p.Y >= minZ-halo && p.Y < maxZ+halo)
+			inCore := (p.X >= minX && p.X < maxX && p.Y >= minZ && p.Y < maxZ)
+			if inHalo && !inCore {
+				addPoint(p) // Add neighboring blue-noise to boundary points for the current chunk being processed
+			}
+		}
+	}
+
+	return allPoints
+}
+
+// getOrGeneratePoints returns blue noise points for a chunk, using caches when available.
+// Priority: 1) Points Cache, 2) Chunk Cache (core sites), 3) Generate new.
+// Caller must hold at least a read lock on cm.mu.
+// If generation is needed, caller should hold a write lock.
+func (cm *ChunkManager) getOrGeneratePoints(coord core.ChunkCoord) []core.Vec2 {
+
+	// Check if points are cached.
+	if pts, ok := cm.pointsCache[coord]; ok {
+		return pts
+	}
+
+	// Optional sanity check. Check the chunk directly for the points
+	// This will never happen under normal circumstances. Caching neighboring points affords us some invariants
+	if chunk, ok := cm.cache[coord]; ok {
+		points := make([]core.Vec2, len(chunk.Mesh.Sites))
+		for i, site := range chunk.Mesh.Sites {
+			points[i] = site.Pos
+		}
+
+		return points
+	}
+
+	// Generate blue noise and cache it
+	minX := float64(coord.X) * cm.cfg.ChunkSize
+	minZ := float64(coord.Z) * cm.cfg.ChunkSize
+	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
+	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
+
+	blueCfg := DefaultBlueNoiseConfig(cm.cfg.MinPointDist)
+	chunkseed := chunkSeed(cm.cfg.WorldSeed, coord)
+	pts := GenerateBlueNoiseSeeded(chunkseed, minX, minZ, maxX, maxZ, blueCfg)
+
+	// Cache the seed for this chunk
+	cm.cache[coord].Seed = chunkseed // Cache on terrain chunk - more likely to be destroyed
+	cm.chunkSeeds[coord] = chunkseed // Cache on chunk manager
+
+	// Cache the generated points
+	cm.pointsCache[coord] = pts
+	return pts
+}
+
+
 // generateChunkHydrology computes rivers, lakes, and ocean data for a chunk.
-func (cm *ChunkManager) generateChunkHydrology(chunk *TerrainChunk) *core.ChunkHydroData {
+func (cm *ChunkManager) generateChunkHydrology(chunk *core.TerrainChunk) *core.ChunkHydroData {
 	hydro := &core.ChunkHydroData{
 		Rivers:       make([]core.RiverSegment, 0),
 		Lakes:        make([]core.Lake, 0),
@@ -638,104 +676,40 @@ func (cm *ChunkManager) findNearestSite(mesh *core.DelaunayMesh, pos core.Vec2) 
 	return bestSite
 }
 
-// generateChunkPoints generates blue noise points for a chunk including halo regions.
-// Uses the point cache to avoid redundant blue noise generation for neighbors.
-// Caller must hold a write lock on cm.mu.
-func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
+// chunkSeed computes a deterministic seed for a chunk based on world seed and coordinates.
+func chunkSeed(worldSeed int64, coord core.ChunkCoord) int64 {
+	h := fnv.New64a()
+	// Write world seed
+	buf := make([]byte, 8)
+	buf[0] = byte(worldSeed)
+	buf[1] = byte(worldSeed >> 8)
+	buf[2] = byte(worldSeed >> 16)
+	buf[3] = byte(worldSeed >> 24)
+	buf[4] = byte(worldSeed >> 32)
+	buf[5] = byte(worldSeed >> 40)
+	buf[6] = byte(worldSeed >> 48)
+	buf[7] = byte(worldSeed >> 56)
+	h.Write(buf)
 
-	// core.ChunkCoord (0, 1)
-	// e.g. 1 * 128.0 = 128.0
-	minX := float64(coord.X) * cm.cfg.ChunkSize
-	minZ := float64(coord.Z) * cm.cfg.ChunkSize
-	maxX := float64(coord.X+1) * cm.cfg.ChunkSize
-	maxZ := float64(coord.Z+1) * cm.cfg.ChunkSize
+	// Write chunk X
+	buf[0] = byte(coord.X)
+	buf[1] = byte(coord.X >> 8)
+	buf[2] = byte(coord.X >> 16)
+	buf[3] = byte(coord.X >> 24)
+	buf[4] = 0
+	buf[5] = 0
+	buf[6] = 0
+	buf[7] = 0
+	h.Write(buf)
 
-	// fmt.Printf(
-	// 	"[2] info-------------\n ChunkSize\t%v\ncoord.X\t%v\ncoord.Z\t%v\nmin:\t(%v, %v)\nmax:(%v, %v)\n---------------\n", 
-	// 	cm.cfg.ChunkSize, coord.X, coord.Z, minX, minZ, maxX, maxZ)
+	// Write chunk Z
+	buf[0] = byte(coord.Z)
+	buf[1] = byte(coord.Z >> 8)
+	buf[2] = byte(coord.Z >> 16)
+	buf[3] = byte(coord.Z >> 24)
+	h.Write(buf)
 
-	halo := cm.cfg.HaloWidth
-
-	// We'll collect points from multiple regions
-	allPoints := make([]core.Vec2, 0, 1024) // 1024 pre-allocated points
-	seen := make(map[uint64]struct{}, 1024) // 1024 pre-allocated seen points
-
-	// Hash a point to detect duplicates (within tolerance)
-	hashPoint := func(p core.Vec2) uint64 {
-		// Quantize to half the min distance for dedup
-		scale := 2.0 / cm.cfg.MinPointDist
-		qx := int64(p.X * scale)
-		qz := int64(p.Y * scale)
-
-		// Create a bitmask for this point
-		return uint64(qx)<<32 | uint64(qz)&0xFFFFFFFF
-	}
-
-	addPoint := func(p core.Vec2) bool {
-		h := hashPoint(p)
-		if _, exists := seen[h]; !exists {
-			seen[h] = struct{}{}
-			allPoints = append(allPoints, p)
-			return true
-		}
-		return false
-	}
-
-	addPoints := func(pts []core.Vec2) {
-		for _, p := range pts {
-			addPoint(p)
-		}
-	}
-
-	// 1. Get or generate core points for this chunk (uses cache if available)
-	corePoints := cm.getOrGeneratePoints(coord)
-	addPoints(corePoints)
-
-	// 2. Plot the neighboring chunk coordinates for this chunk
-	neighbors := []core.ChunkCoord{
-		{X: coord.X - 1, Z: coord.Z - 1}, {X: coord.X, Z: coord.Z - 1}, {X: coord.X + 1, Z: coord.Z - 1},
-		{X: coord.X - 1, Z: coord.Z}, {X: coord.X + 1, Z: coord.Z},
-		{X: coord.X - 1, Z: coord.Z + 1}, {X: coord.X, Z: coord.Z + 1}, {X: coord.X + 1, Z: coord.Z + 1},
-	}
-
-	// 3 Generate all neighboring chunk points and add them to the allPoints list
-	for _, neighbor := range neighbors {
-		// The boundary region is where this chunk's halo overlaps the neighbor (world-space coordinates)
-		nMinX := float64(neighbor.X) * cm.cfg.ChunkSize
-		nMinZ := float64(neighbor.Z) * cm.cfg.ChunkSize
-		nMaxX := float64(neighbor.X+1) * cm.cfg.ChunkSize
-		nMaxZ := float64(neighbor.Z+1) * cm.cfg.ChunkSize
-
-		// Compute the overlap region between our extended bounds and neighbor's core
-		overlapMinX := max(minX-halo, nMinX) // Hmm... I don't think nMinX will ever be less than minX-halo
-		overlapMinZ := max(minZ-halo, nMinZ)
-		overlapMaxX := min(maxX+halo, nMaxX)
-		overlapMaxZ := min(maxZ+halo, nMaxZ)
-
-		// Big ol' wtf right here
-		if overlapMinX >= overlapMaxX || overlapMinZ >= overlapMaxZ {
-			continue // No overlap
-		}
-
-		// Get neighbor's core points (from chunk cache, points cache, or generate + cache)
-		coreNeighborPoints := cm.getOrGeneratePoints(neighbor)
-
-		/*
-			[Optimization]
-			Definitely a spot that can be optimized by caching the padded boundary within each chunk
-			that represents the halo region of neighboring chunks
-		*/
-		// Filter to points within our halo region but outside our core
-		for _, p := range coreNeighborPoints {
-			inHalo := (p.X >= minX-halo && p.X < maxX+halo && p.Y >= minZ-halo && p.Y < maxZ+halo)
-			inCore := (p.X >= minX && p.X < maxX && p.Y >= minZ && p.Y < maxZ)
-			if inHalo && !inCore {
-				addPoint(p) // Add neighboring blue-noise to boundary points for the current chunk being processed
-			}
-		}
-	}
-
-	return allPoints
+	return int64(h.Sum64())
 }
 
 // // SampleHeight returns the interpolated height at position (x, z).
@@ -793,38 +767,20 @@ func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
 // 	return int64(h.Sum64())
 // }
 
-// chunkSeed computes a deterministic seed for a chunk based on world seed and coordinates.
-func chunkSeed(worldSeed int64, coord core.ChunkCoord) int64 {
-	h := fnv.New64a()
-	// Write world seed
-	buf := make([]byte, 8)
-	buf[0] = byte(worldSeed)
-	buf[1] = byte(worldSeed >> 8)
-	buf[2] = byte(worldSeed >> 16)
-	buf[3] = byte(worldSeed >> 24)
-	buf[4] = byte(worldSeed >> 32)
-	buf[5] = byte(worldSeed >> 40)
-	buf[6] = byte(worldSeed >> 48)
-	buf[7] = byte(worldSeed >> 56)
-	h.Write(buf)
+// CacheSize returns the number of cached chunks.
+// func (cm *ChunkManager) CacheSize() int {
+// 	cm.mu.RLock()
+// 	defer cm.mu.RUnlock()
+// 	return len(cm.cache)
+// }
 
-	// Write chunk X
-	buf[0] = byte(coord.X)
-	buf[1] = byte(coord.X >> 8)
-	buf[2] = byte(coord.X >> 16)
-	buf[3] = byte(coord.X >> 24)
-	buf[4] = 0
-	buf[5] = 0
-	buf[6] = 0
-	buf[7] = 0
-	h.Write(buf)
-
-	// Write chunk Z
-	buf[0] = byte(coord.Z)
-	buf[1] = byte(coord.Z >> 8)
-	buf[2] = byte(coord.Z >> 16)
-	buf[3] = byte(coord.Z >> 24)
-	h.Write(buf)
-
-	return int64(h.Sum64())
-}
+// // CachedCoords returns all cached chunk coordinates.
+// func (cm *ChunkManager) CachedCoords() []core.ChunkCoord {
+// 	cm.mu.RLock()
+// 	defer cm.mu.RUnlock()
+// 	coords := make([]core.ChunkCoord, 0, len(cm.cache))
+// 	for coord := range cm.cache {
+// 		coords = append(coords, coord)
+// 	}
+// 	return coords
+// }

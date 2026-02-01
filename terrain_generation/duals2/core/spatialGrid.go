@@ -93,6 +93,7 @@ func (sg *SpatialGrid) GetTriangleNormal(x, z float64, normals []Vec3) (Vec3, bo
 }
 
 // TrianglesInBounds returns all triangle indices whose bounding boxes overlap the given region.
+// Providing min and max values allow us to cover more than 1x1 cells, we can select entire rectangular regions.
 func (sg *SpatialGrid) TrianglesInBounds(minX, minZ, maxX, maxZ float64) []int {
 	if sg == nil {
 		return nil

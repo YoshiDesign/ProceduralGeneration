@@ -3,7 +3,66 @@ package core
 import (
 	"fmt"
 	"math"
+
+	"github.com/hajimehoshi/ebiten/v2"
 )
+
+// TerrainChunk represents a generated terrain chunk with mesh data.
+type TerrainChunk struct {
+	Coord ChunkCoord
+	Cfg   ChunkConfig
+	Seed  int64
+
+	// Core bounds (what this chunk "owns")
+	MinX, MinZ float64
+	MaxX, MaxZ float64
+
+	// The Delaunay mesh (includes halo points for boundary continuity)
+	Mesh *DelaunayMesh
+
+	// Height values per site (parallel to Mesh.Sites)
+	Heights []float64
+
+	// Watershed divide weights per site (parallel to Mesh.Sites)
+	// 0.0 = normal terrain, 1.0 = full watershed divide
+	// Used by vertex shader to elevate terrain at lake boundaries
+	WatershedWeights []float64
+
+	// Face normals per triangle (parallel to Mesh.Tris)
+	FaceNormals []Vec3
+
+	// Spatial index for fast point location
+	Spatial *SpatialGrid
+
+	// Which sites are in the core region (not halo)
+	CoreSiteIndices []SiteIndex
+
+	// Hydrology data
+	Hydro *ChunkHydroData
+
+	// Pre-computed render data for batched drawing
+	RenderVertices []ebiten.Vertex
+	RenderIndices  []uint16
+
+	// Pre-computed hydrology render data
+	LakeVertices  []ebiten.Vertex
+	LakeIndices   []uint16
+	OceanVertices []ebiten.Vertex
+	OceanIndices  []uint16
+
+	// Erosion
+	ErosionHeightDeltas []float64
+}
+
+// ChunkConfig holds parameters for terrain chunk generation.
+type ChunkConfig struct {
+	ChunkSize    float64 // World units per chunk side (e.g., 256.0)
+	MinPointDist float64 // Minimum distance between blue noise points
+	HaloWidth    float64 // Boundary overlap region width (typically = MinPointDist)
+	WorldSeed    int64   // Global world seed
+	ChunksX      int     // Number of chunks along the X axis
+	ChunksZ      int     // Number of chunks along the Z axis
+}
 
 // BuildHalfEdgeMesh constructs connectivity from Sites + Tris.
 // Triangles must reference valid site indices.
@@ -30,7 +89,7 @@ func BuildHalfEdgeMesh(sites []Site, tris []Triangle) (*DelaunayMesh, error) {
 	edgeMap := make(map[dirKey]int, len(tris)*3)
 
 	for ti, t := range tris {
-		if t.A < 0 || t.A >= len(sites) || t.B < 0 || t.B >= len(sites) || t.C < 0 || t.C >= len(sites) {
+		if int(t.A) < 0 || int(t.A) >= len(sites) || int(t.B) < 0 || int(t.B) >= len(sites) || int(t.C) < 0 || int(t.C) >= len(sites) {
 			return nil, fmt.Errorf("triangle %d has out-of-range indices: %+v", ti, t)
 		}
 
@@ -156,6 +215,7 @@ func orientation2D(a, b, p Vec2) float64 {
 	return (b.X-a.X)*(p.Y-a.Y) - (b.Y-a.Y)*(p.X-a.X)
 }
 
+// DUPLICATE FUNCTION: spatialGrid.go	
 // pointInTriangle checks if point p is inside triangle (a, b, c) using orientation tests.
 // Returns true if inside or on boundary.
 func pointInTriangle(a, b, c, p Vec2) bool {
@@ -568,7 +628,7 @@ func Triangulate(points []Vec2) []Triangle {
 		}
 		if !usesSuperVertex {
 			// Ensure CCW winding
-			result = append(result, ensureCCW(allPts, t.a, t.b, t.c))
+			result = append(result, ensureCCW(allPts, SiteIndex(t.a), SiteIndex(t.b), SiteIndex(t.c)))
 		}
 	}
 
@@ -604,7 +664,7 @@ func inCircumcircle(a, b, c, p Vec2) bool {
 }
 
 // ensureCCW returns a Triangle with vertices in counter-clockwise order.
-func ensureCCW(pts []Vec2, a, b, c int) Triangle {
+func ensureCCW(pts []Vec2, a, b, c SiteIndex) Triangle {
 	// Cross product of (b-a) × (c-a)
 	cross := (pts[b].X-pts[a].X)*(pts[c].Y-pts[a].Y) - (pts[c].X-pts[a].X)*(pts[b].Y-pts[a].Y)
 	if cross < 0 {

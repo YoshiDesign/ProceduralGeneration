@@ -14,7 +14,7 @@ import (
 // DualsDemo is a visualization module for the Delaunay terrain system.
 type DualsDemo struct {
 	Manager       *ChunkManager   // Chunk manager with caching
-	Chunks        []*TerrainChunk // Active chunks for rendering
+	Chunks        []*core.TerrainChunk // Active chunks for rendering
 	ScreenW       int
 	ScreenH       int
 	Scale         float64 // pixels per world unit
@@ -26,7 +26,7 @@ type DualsDemo struct {
 
 	// Debug UI for parameter tuning
 	DebugUI   *DebugUI
-	chunkCfg  ChunkConfig // Store for regeneration
+	chunkCfg  core.ChunkConfig // Store for regeneration
 }
 
 func exampleHeightFunc(x, z float64) float64 {
@@ -77,7 +77,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	manager := NewChunkManager(cfg, heightFunc)
 
 	// Generate a X,Z grid of chunks using the manager (benefits from caching)
-	chunks := make([]*TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
+	chunks := make([]*core.TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
 	for cz := 0; cz < cfg.ChunksZ; cz++ {
 		for cx := 0; cx < cfg.ChunksX; cx++ {
 			coord := core.ChunkCoord{X: cx, Z: cz}
@@ -104,7 +104,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 		ShowVoronoi:   false,
 		ShowNormals:   false,
 		ShowHydrology: true, // Enable hydrology visualization by default
-		chunkCfg:      cfg,
+		chunkCfg:      cfg, // Do not use for anything other than regeneration. Use the manager's config instead.
 	}
 
 	// Create debug UI with regeneration callback
@@ -129,7 +129,7 @@ func (d *DualsDemo) worldToScreen(x, z float64) (float32, float32) {
 
 // buildRenderData pre-computes vertices and indices for batched triangle rendering.
 // This should be called once when chunks are generated or when view parameters change.
-func (d *DualsDemo) buildRenderData(chunk *TerrainChunk) {
+func (d *DualsDemo) buildRenderData(chunk *core.TerrainChunk) {
 	mesh := chunk.Mesh
 	if mesh == nil {
 		chunk.RenderVertices = nil
@@ -234,7 +234,7 @@ func (d *DualsDemo) buildAllRenderData() {
 }
 
 // buildHydrologyRenderData pre-computes vertices for lake and ocean triangles.
-func (d *DualsDemo) buildHydrologyRenderData(chunk *TerrainChunk) {
+func (d *DualsDemo) buildHydrologyRenderData(chunk *core.TerrainChunk) {
 	// Clear existing hydrology render data
 	chunk.LakeVertices = nil
 	chunk.LakeIndices = nil
@@ -253,7 +253,7 @@ func (d *DualsDemo) buildHydrologyRenderData(chunk *TerrainChunk) {
 }
 
 // buildLakeRenderData pre-computes vertices for all lake triangles in a chunk.
-func (d *DualsDemo) buildLakeRenderData(chunk *TerrainChunk) {
+func (d *DualsDemo) buildLakeRenderData(chunk *core.TerrainChunk) {
 	if len(chunk.Hydro.Lakes) == 0 {
 		return
 	}
@@ -265,10 +265,10 @@ func (d *DualsDemo) buildLakeRenderData(chunk *TerrainChunk) {
 	a := float32(180) / 255.0
 
 	// Collect all lake site indices across all lakes
-	allLakeSites := make(map[int]struct{})
+	allLakeSites := make(map[core.SiteIndex]struct{})
 	for _, lake := range chunk.Hydro.Lakes {
 		for _, idx := range lake.SiteIndices {
-			allLakeSites[int(idx)] = struct{}{}
+			allLakeSites[idx] = struct{}{}
 		}
 	}
 
@@ -321,7 +321,7 @@ func (d *DualsDemo) buildLakeRenderData(chunk *TerrainChunk) {
 }
 
 // buildOceanRenderData pre-computes vertices for ocean triangles with depth-based coloring.
-func (d *DualsDemo) buildOceanRenderData(chunk *TerrainChunk) {
+func (d *DualsDemo) buildOceanRenderData(chunk *core.TerrainChunk) {
 	ocean := chunk.Hydro.Ocean
 	if !ocean.IsOcean || len(ocean.SubmergedTris) == 0 {
 		return
@@ -388,13 +388,16 @@ func (d *DualsDemo) Update() {
 
 // regenerate rebuilds all chunks with new parameters.
 func (d *DualsDemo) regenerate(noiseParams core.NoiseParams, hydroConfig hydro.HydroConfig) {
+
+	cfg := DefaultChunkConfig()
+
 	// Update manager configurations
 	d.Manager.SetNoiseParams(noiseParams)
 	d.Manager.SetHydroConfig(hydroConfig)
 	d.Manager.ClearCaches()
 
 	// Regenerate all chunks
-	d.Chunks = make([]*TerrainChunk, 0, 24)
+	d.Chunks = make([]*core.TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
 	for cz := 0; cz < d.Manager.cfg.ChunksZ; cz++ {
 		for cx := 0; cx < d.Manager.cfg.ChunksX; cx++ {
 			coord := core.ChunkCoord{X: cx, Z: cz}
@@ -436,7 +439,7 @@ func (d *DualsDemo) Draw(screen *ebiten.Image) {
 }
 
 // drawChunkHydrology renders all water features for a chunk.
-func (d *DualsDemo) drawChunkHydrology(screen *ebiten.Image, chunk *TerrainChunk) {
+func (d *DualsDemo) drawChunkHydrology(screen *ebiten.Image, chunk *core.TerrainChunk) {
 	if chunk.Hydro == nil {
 		return
 	}
@@ -448,7 +451,7 @@ func (d *DualsDemo) drawChunkHydrology(screen *ebiten.Image, chunk *TerrainChunk
 }
 
 // drawChunk renders a single terrain chunk using batched DrawTriangles.
-func (d *DualsDemo) drawChunk(screen *ebiten.Image, chunk *TerrainChunk) {
+func (d *DualsDemo) drawChunk(screen *ebiten.Image, chunk *core.TerrainChunk) {
 	if len(chunk.RenderVertices) == 0 || len(chunk.RenderIndices) == 0 {
 		return
 	}
@@ -458,7 +461,7 @@ func (d *DualsDemo) drawChunk(screen *ebiten.Image, chunk *TerrainChunk) {
 }
 
 // drawChunkBoundary draws the chunk boundary.
-func (d *DualsDemo) drawChunkBoundary(screen *ebiten.Image, chunk *TerrainChunk) {
+func (d *DualsDemo) drawChunkBoundary(screen *ebiten.Image, chunk *core.TerrainChunk) {
 	boundaryColor := color.RGBA{100, 100, 200, 200}
 
 	x1, y1 := d.worldToScreen(chunk.MinX, chunk.MinZ)
@@ -498,7 +501,7 @@ func clamp(v, minV, maxV float64) float64 {
 // -------------------------------------------------------------------
 
 // drawRivers renders river segments as width-varying blue lines.
-func (d *DualsDemo) drawRivers(screen *ebiten.Image, chunk *TerrainChunk) {
+func (d *DualsDemo) drawRivers(screen *ebiten.Image, chunk *core.TerrainChunk) {
 	if chunk.Hydro == nil {
 		return
 	}
@@ -558,7 +561,7 @@ func (d *DualsDemo) drawRivers(screen *ebiten.Image, chunk *TerrainChunk) {
 }
 
 // drawLakes renders lakes as filled water areas using batched DrawTriangles.
-func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *TerrainChunk) {
+func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *core.TerrainChunk) {
 	if chunk.Hydro == nil || chunk.Mesh == nil {
 		return
 	}
@@ -577,9 +580,9 @@ func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *TerrainChunk) {
 		}
 
 		// Create a set of lake site indices for fast lookup
-		lakeSites := make(map[int]bool)
+		lakeSites := make(map[core.SiteIndex]bool)
 		for _, idx := range lake.SiteIndices {
-			lakeSites[int(idx)] = true
+			lakeSites[idx] = true
 		}
 
 		// Draw lake outline by finding boundary edges
@@ -628,7 +631,7 @@ func (d *DualsDemo) drawLakes(screen *ebiten.Image, chunk *TerrainChunk) {
 }
 
 // drawOcean renders ocean areas with submerged triangles and coastline using batched DrawTriangles.
-func (d *DualsDemo) drawOcean(screen *ebiten.Image, chunk *TerrainChunk) {
+func (d *DualsDemo) drawOcean(screen *ebiten.Image, chunk *core.TerrainChunk) {
 	if chunk.Hydro == nil || chunk.Mesh == nil {
 		return
 	}

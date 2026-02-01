@@ -67,7 +67,7 @@ func (m *DelaunayMesh) SampleScalar(triID int, p Vec2, valuesAtSites []float64) 
 	return wa*va + wb*vb + wc*vc, true
 }
 
-// TriangleGradient returns the constant gradient of a linearly interpolated scalar field
+// TriangleGradient returns the constant (positive) gradient of a linearly interpolated scalar field
 // over the triangle (triID), assuming the scalar values are defined at the triangle's sites.
 //
 // For terrain height h(x,z), interpret:
@@ -78,6 +78,8 @@ func (m *DelaunayMesh) SampleScalar(triID int, p Vec2, valuesAtSites []float64) 
 //
 // Returns (dhdx, dhdy, ok). ok=false if degenerate triangle or bad inputs.
 func (m *DelaunayMesh) TriangleGradient(triID int, valuesAtSites []float64) (dhdx, dhdy float64, ok bool) {
+	
+	// This is a useless check given invarianats of the mesh
 	if len(valuesAtSites) < len(m.Sites) {
 		return 0, 0, false
 	}
@@ -109,9 +111,21 @@ func (m *DelaunayMesh) TriangleGradient(triID int, valuesAtSites []float64) (dhd
 	ab := b.Sub(a)
 	ac := c.Sub(a)
 
+	/**
+	 * 6) Performance note (when you get there)
+	 * This solver is cheap, but if you do many steps per droplet, you may want to 
+	 * precompute the geometric inverse per triangle (since (ab, ac) doesn’t change), 
+	 * then each step you only do:
+	 * [𝑝𝑥,𝑝𝑦]𝑇=𝑖𝑛𝑣𝑀∗[ℎ𝑏−ℎ𝑎,ℎ𝑐−ℎ𝑎]𝑇[px,py]T=invM∗[hb−ha,hc−ha]T
+	 * 
+	 * That’s 4 multiplies + 2 adds instead of rebuilding every time. 
+	 * Only caveat: heights change with erosion, but the inverse matrix does not.
+	 **/
+
 	det := cross2(ab, ac)
-	const eps = 1e-12
-	if math.Abs(det) < eps {
+	area2 := det // readability I suppose
+	scale := ab.Len()*ac.Len()
+	if math.Abs(area2) < 1e-12*scale { // degenerate triangle
 		return 0, 0, false
 	}
 

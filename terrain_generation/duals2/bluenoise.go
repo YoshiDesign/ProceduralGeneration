@@ -22,7 +22,7 @@ func DefaultBlueNoiseConfig(minDist float64) BlueNoiseConfig {
 
 // GenerateBlueNoise generates Poisson disk–distributed points within a rectangular region
 // using Bridson's algorithm. The region spans [minX, maxX) × [minZ, maxZ).
-//
+// The number of points can vary, it's determined by the size of each chunk, the resulting point distribution, and the min distance between points.
 // rng is a seeded random source for determinism.
 // Returns a slice of core.Vec2 points.
 func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueNoiseConfig) []core.Vec2 {
@@ -42,7 +42,7 @@ func GenerateBlueNoise(rng *rand.Rand, minX, minZ, maxX, maxZ float64, cfg BlueN
 	// fmt.Printf("GenerateBlueNoise---\nmax: (%v, %v)\nmin: (%v, %v)\nwidth: %v\theight: %v ----", maxX, maxZ, minX, minZ, width, height)
 
 	// Cell size for the background grid: r / sqrt(2) guarantees at most one point per cell
-	cellSize := cfg.MinDist / math.Sqrt(2)
+	cellSize := cfg.MinDist / math.Sqrt(2) // The magic formula for the magic number (MinDist)
 	gridW := int(math.Ceil(width / cellSize))
 	gridH := int(math.Ceil(height / cellSize))
 

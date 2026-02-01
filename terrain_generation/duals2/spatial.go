@@ -20,6 +20,7 @@ func BuildSpatialGrid(mesh *core.DelaunayMesh, heights []float64, cellSize, minX
 
 	gridW := int(math.Ceil(width / cellSize))
 	gridH := int(math.Ceil(height / cellSize))
+
 	if gridW <= 0 {
 		gridW = 1
 	}
