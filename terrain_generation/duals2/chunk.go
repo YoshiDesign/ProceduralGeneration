@@ -32,8 +32,8 @@ type ChunkManager struct {
 func DefaultNoiseParams() core.NoiseParams {
 	return core.NoiseParams{
 		Octaves:     7,
-		Frequency:   0.1,
-		Amplitude:   3.0,
+		Frequency:   0.002,
+		Amplitude:   10.0,
 		Persistence: 0.2,
 		Lacunarity:  2.0,
 	}
@@ -42,7 +42,7 @@ func DefaultNoiseParams() core.NoiseParams {
 // DefaultChunkConfig returns sensible defaults for a terrain chunk.
 func DefaultChunkConfig() core.ChunkConfig {
 	return core.ChunkConfig{
-		ChunkSize:    128.0,
+		ChunkSize:    256.0,
 		MinPointDist: 8.0,
 		HaloWidth:    8.0,
 		WorldSeed:    42,
@@ -57,15 +57,17 @@ func NewChunkManager(cfg core.ChunkConfig, heightFunc func(x, z float64, octaves
 		cache:       make(map[core.ChunkCoord]*core.TerrainChunk),
 		pointsCache: make(map[core.ChunkCoord][]core.Vec2),
 		cfg:         cfg,
+		chunkSeeds:  make(map[core.ChunkCoord]int64),
 		noiseParams: DefaultNoiseParams(),
 		heightFunc:  heightFunc,
-		hydroMgr:       hydro.NewHydroManager(hydro.DefaultHydroConfig(), cfg.WorldSeed),
+		hydroMgr:    hydro.NewHydroManager(hydro.DefaultHydroConfig(), cfg.WorldSeed),
+		erosMgr: 	 eros.NewErosionManager(),
 	}
 }
 
 /* DEMO CODE - BEGIN */
 
-// HydroManager returns the hydrology manager for advanced hydrology operations.
+// HydroManager returns the hydrology manager for `advanced hydrology operations.
 func (cm *ChunkManager) HydroManager() *hydro.HydroManager {
 	return cm.hydroMgr
 }
@@ -215,7 +217,7 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 	chunk.Mesh = mesh
 
 	// Compute face normals
-	chunk.FaceNormals = mesh.AllFaceNormals(heights)
+	// chunk.FaceNormals = mesh.AllFaceNormals(heights)
 
 	// Build spatial index
 	// Cell size roughly equal to minimum point distance for good performance
@@ -223,16 +225,25 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 		chunk.MinX-cm.cfg.HaloWidth, chunk.MinZ-cm.cfg.HaloWidth,
 		chunk.MaxX+cm.cfg.HaloWidth, chunk.MaxZ+cm.cfg.HaloWidth)
 
-	// chunk.Erosion = cm.GenerateChunkErosion(chunk)
+	// Generate erosion height deltas on the erosion manager for this chunk
+	error := cm.erosMgr.HydraulicErosion(chunk, chunk.Spatial, cm.chunkSeeds[coord])
+	if error != nil {
+		fmt.Println("[ERROR] Failed to generate erosion height deltas: ", error)
+	}
+
+	for siteIdx, delta := range cm.erosMgr.ErosionHeightDeltas[chunk.Coord] {
+		chunk.Heights[siteIdx] += delta
+		chunk.Mesh.Sites[siteIdx].Height += delta
+	}
+
+	// Recompute face normals after erosion modifies heights
+	chunk.FaceNormals = mesh.AllFaceNormals(chunk.Heights)
 
 	// Initialize watershed weights to 0.0 (no watershed modification)
 	chunk.WatershedWeights = make([]float64, len(allPoints))
 
-	// Generate erosion height deltas on the erosion manager for this chunk
-	cm.erosMgr.HydraulicErosion(chunk, chunk.Spatial)
-
 	// Generate hydrology data
-	chunk.Hydro = cm.generateChunkHydrology(chunk)
+	// chunk.Hydro = cm.generateChunkHydrology(chunk)
 
 	return chunk, nil
 }
@@ -369,15 +380,12 @@ func (cm *ChunkManager) getOrGeneratePoints(coord core.ChunkCoord) []core.Vec2 {
 	chunkseed := chunkSeed(cm.cfg.WorldSeed, coord)
 	pts := GenerateBlueNoiseSeeded(chunkseed, minX, minZ, maxX, maxZ, blueCfg)
 
-	// Cache the seed for this chunk
-	cm.cache[coord].Seed = chunkseed // Cache on terrain chunk - more likely to be destroyed
 	cm.chunkSeeds[coord] = chunkseed // Cache on chunk manager
 
 	// Cache the generated points
 	cm.pointsCache[coord] = pts
 	return pts
 }
-
 
 // generateChunkHydrology computes rivers, lakes, and ocean data for a chunk.
 func (cm *ChunkManager) generateChunkHydrology(chunk *core.TerrainChunk) *core.ChunkHydroData {

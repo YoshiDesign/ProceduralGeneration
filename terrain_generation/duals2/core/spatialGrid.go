@@ -58,6 +58,7 @@ func (sg *SpatialGrid) pointInTriangle(ti int, p Vec2) bool {
 	return wa >= eps && wb >= eps && wc >= eps
 }
 
+// SEE ALSO: Mesh.SampleScalar() for when you already know the triangle index
 // SampleHeight returns the interpolated height at position (x, z).
 // Returns (height, ok) where ok=false if the point is outside all triangles.
 func (sg *SpatialGrid) SampleHeight(x, z float64) (float64, bool) {

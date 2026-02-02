@@ -101,8 +101,8 @@ func (d *DebugUI) buildUI() *ebitenui.UI {
 	// Noise Parameters Section
 	panelContainer.AddChild(d.createLabel("-- Noise --", color.RGBA{180, 180, 255, 255}))
 	panelContainer.AddChild(d.createIntSlider("Octaves", &d.NoiseParams.Octaves, 1, 12, "octaves"))
-	panelContainer.AddChild(d.createFloatSlider("Frequency", &d.NoiseParams.Frequency, 0.01, 1.0, "frequency"))
-	panelContainer.AddChild(d.createFloatSlider("Amplitude", &d.NoiseParams.Amplitude, 0.1, 10.0, "amplitude"))
+	panelContainer.AddChild(d.createFloatSlider("Frequency", &d.NoiseParams.Frequency, 0.001, 0.05, "frequency"))
+	panelContainer.AddChild(d.createFloatSlider("Amplitude", &d.NoiseParams.Amplitude, 1.0, 50.0, "amplitude"))
 	panelContainer.AddChild(d.createFloatSlider("Persistence", &d.NoiseParams.Persistence, 0.1, 1.0, "persistence"))
 	panelContainer.AddChild(d.createFloatSlider("Lacunarity", &d.NoiseParams.Lacunarity, 1.0, 4.0, "lacunarity"))
 
