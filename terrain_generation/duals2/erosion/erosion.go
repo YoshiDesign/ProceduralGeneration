@@ -366,8 +366,8 @@ func (em *ErosionManager) NewDroplet(x, z int, rng *rand.Rand) Droplet {
 
 	// Initialize a random direction unit vector
 	dir := core.Vec2{
-		X: rng.Float64(),
-		Y: rng.Float64(),
+		X: rng.Float64()*2 - 1,
+		Y: rng.Float64()*2 - 1,
 	}
 	dir = dir.Normalize()
 
