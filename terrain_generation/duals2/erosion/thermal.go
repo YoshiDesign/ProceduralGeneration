@@ -123,6 +123,10 @@ func (em *ErosionManager) ThermalErosion(chunk *core.TerrainChunk, cfg ThermalCo
 					transfer = 0
 				}
 
+				// Apply hardness: harder source sites lose less material
+				siteHardness := em.GetHardness(site)
+				transfer *= (1.0 - siteHardness)
+
 				// Accumulate deltas (will apply after full pass)
 				deltas[siteIdx] -= transfer
 				deltas[neighbor] += transfer

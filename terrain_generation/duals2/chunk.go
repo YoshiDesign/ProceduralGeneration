@@ -53,6 +53,9 @@ func DefaultChunkConfig() core.ChunkConfig {
 
 // NewChunkManager creates a new chunk manager with the given configuration.
 func NewChunkManager(cfg core.ChunkConfig, heightFunc func(x, z float64, octaves int, frequency, amplitude, persistence, lacunarity float64) float64) *ChunkManager {
+	// Inject simplex noise function into erosion package for hardness/ridge noise
+	eros.SimplexNoise2D = Simplex2D
+
 	return &ChunkManager{
 		cache:       make(map[core.ChunkCoord]*core.TerrainChunk),
 		pointsCache: make(map[core.ChunkCoord][]core.Vec2),
@@ -225,8 +228,16 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 		chunk.MinX-cm.cfg.HaloWidth, chunk.MinZ-cm.cfg.HaloWidth,
 		chunk.MaxX+cm.cfg.HaloWidth, chunk.MaxZ+cm.cfg.HaloWidth)
 
-	// Get thermal erosion config for timing decisions
+	// Get erosion configs
 	thermalCfg := cm.erosMgr.ThermalConfig()
+	peakCfg := cm.erosMgr.PeakConfig()
+
+	// Compute hardness map BEFORE erosion (protects peaks during erosion)
+	var hardnessMap []float64
+	if peakCfg.Hardness.Enabled {
+		hardnessMap = eros.ComputeHardnessMap(chunk, peakCfg.Hardness)
+		cm.erosMgr.SetHardnessMap(hardnessMap)
+	}
 
 	// Run thermal erosion BEFORE hydraulic if configured
 	if thermalCfg.Enabled && thermalCfg.Timing == "before" {
@@ -247,6 +258,14 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 	// Run thermal erosion AFTER hydraulic if configured (default)
 	if thermalCfg.Enabled && (thermalCfg.Timing == "after" || thermalCfg.Timing == "") {
 		cm.erosMgr.ThermalErosion(chunk, thermalCfg)
+	}
+
+	// Clear hardness map after erosion (no longer needed)
+	cm.erosMgr.SetHardnessMap(nil)
+
+	// Run ridge enhancement AFTER all erosion (sharpens peaks)
+	if peakCfg.Ridge.Enabled {
+		eros.EnhanceRidges(chunk, peakCfg.Ridge)
 	}
 
 	// Recompute face normals after erosion modifies heights

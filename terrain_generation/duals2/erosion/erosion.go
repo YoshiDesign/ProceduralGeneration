@@ -36,6 +36,8 @@ type ErosionManager struct {
 	Droplets []Droplet
 	cfg ErosionConfig
 	thermalCfg ThermalConfig
+	peakCfg PeakConfig
+	currentHardness []float64 // Hardness map for current chunk being processed
 }
 
 type ErosionConfig struct {
@@ -65,6 +67,7 @@ func NewErosionManager() *ErosionManager {
 		ErosionHeightDeltas: make(map[core.ChunkCoord]map[core.SiteIndex]float64), // Erosion output for every chunk generated
 		cfg: HeavyErosion(),
 		thermalCfg: DefaultThermalConfig(),
+		peakCfg: DramaticPeaks(),
 	}
 }
 
@@ -76,6 +79,29 @@ func (em *ErosionManager) ThermalConfig() ThermalConfig {
 // SetThermalConfig updates the thermal erosion configuration.
 func (em *ErosionManager) SetThermalConfig(cfg ThermalConfig) {
 	em.thermalCfg = cfg
+}
+
+// PeakConfig returns the current peak enhancement configuration.
+func (em *ErosionManager) PeakConfig() PeakConfig {
+	return em.peakCfg
+}
+
+// SetPeakConfig updates the peak enhancement configuration.
+func (em *ErosionManager) SetPeakConfig(cfg PeakConfig) {
+	em.peakCfg = cfg
+}
+
+// SetHardnessMap sets the hardness map for the current erosion pass.
+func (em *ErosionManager) SetHardnessMap(hardness []float64) {
+	em.currentHardness = hardness
+}
+
+// GetHardness returns the hardness value at a site, or 0 if not set.
+func (em *ErosionManager) GetHardness(site core.SiteIndex) float64 {
+	if em.currentHardness == nil || int(site) >= len(em.currentHardness) {
+		return 0
+	}
+	return em.currentHardness[site]
 }
 
 func (em *ErosionManager) HydraulicErosion(chunk *core.TerrainChunk, sg *core.SpatialGrid, chunkSeed int64) error {
@@ -296,6 +322,11 @@ func (em *ErosionManager) Erode(
 		// increase sediment by: min((c −sediment) · perosion,−hdiff)
 		// Note: We're not performing this step on a per-site basis here.
 		toErode = (droplet.Capacity - droplet.Sediment) * em.cfg.PErosion
+		
+		// Apply hardness: harder terrain erodes less
+		avgHardness := AverageHardness(em.currentHardness, siteIndices, w)
+		toErode *= (1.0 - avgHardness)
+		
 		droplet.Sediment += toErode
 		excess = false
 	}
