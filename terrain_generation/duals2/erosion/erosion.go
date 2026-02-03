@@ -35,6 +35,7 @@ type ErosionManager struct {
 	ErosionHeightDeltas map[core.ChunkCoord]map[core.SiteIndex]float64
 	Droplets []Droplet
 	cfg ErosionConfig
+	thermalCfg ThermalConfig
 }
 
 type ErosionConfig struct {
@@ -63,7 +64,18 @@ func NewErosionManager() *ErosionManager {
 	return &ErosionManager{
 		ErosionHeightDeltas: make(map[core.ChunkCoord]map[core.SiteIndex]float64), // Erosion output for every chunk generated
 		cfg: HeavyErosion(),
+		thermalCfg: DefaultThermalConfig(),
 	}
+}
+
+// ThermalConfig returns the current thermal erosion configuration.
+func (em *ErosionManager) ThermalConfig() ThermalConfig {
+	return em.thermalCfg
+}
+
+// SetThermalConfig updates the thermal erosion configuration.
+func (em *ErosionManager) SetThermalConfig(cfg ThermalConfig) {
+	em.thermalCfg = cfg
 }
 
 func (em *ErosionManager) HydraulicErosion(chunk *core.TerrainChunk, sg *core.SpatialGrid, chunkSeed int64) error {

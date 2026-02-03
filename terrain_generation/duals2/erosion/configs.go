@@ -65,3 +65,60 @@ func ArtisticErosion() ErosionConfig {
 		NumSteps:     100,    // Long simulation to see full effect
 	}
 }
+
+// ============================================================================
+// Combined Erosion Presets (Hydraulic + Thermal)
+// ============================================================================
+
+// CombinedErosionConfig holds both hydraulic and thermal erosion settings.
+type CombinedErosionConfig struct {
+	Hydraulic ErosionConfig
+	Thermal   ThermalConfig
+}
+
+// NaturalErosion returns a balanced combination of hydraulic and thermal erosion.
+// Produces realistic terrain with carved channels and talus deposits.
+func NaturalErosion() CombinedErosionConfig {
+	return CombinedErosionConfig{
+		Hydraulic: AverageErosion(),
+		Thermal:   DefaultThermalConfig(),
+	}
+}
+
+// AggressiveErosion returns heavy hydraulic erosion with aggressive thermal weathering.
+// Creates deeply carved terrain with significant talus accumulation.
+func AggressiveErosion() CombinedErosionConfig {
+	return CombinedErosionConfig{
+		Hydraulic: HeavyErosion(),
+		Thermal:   HeavyThermal(),
+	}
+}
+
+// GentleWeathering returns subtle erosion for light terrain modification.
+// Good for adding natural character without dramatic changes.
+func GentleWeathering() CombinedErosionConfig {
+	return CombinedErosionConfig{
+		Hydraulic: SubtleErosion(),
+		Thermal:   SubtleThermal(),
+	}
+}
+
+// HydraulicOnly returns hydraulic erosion with thermal disabled.
+// Use when you only want water-based erosion.
+func HydraulicOnly() CombinedErosionConfig {
+	return CombinedErosionConfig{
+		Hydraulic: HeavyErosion(),
+		Thermal: ThermalConfig{
+			Enabled: false,
+		},
+	}
+}
+
+// ThermalOnly returns thermal erosion with minimal hydraulic erosion.
+// Use when you only want slope-based material movement.
+func ThermalOnly() CombinedErosionConfig {
+	return CombinedErosionConfig{
+		Hydraulic: SubtleErosion(),
+		Thermal:   HeavyThermal(),
+	}
+}

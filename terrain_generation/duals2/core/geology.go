@@ -158,6 +158,41 @@ func GetFlowBiasedNeighbors(mesh *DelaunayMesh, site SiteIndex, bias Vec2) []Sit
 
 }
 
+// GetAllNeighbors returns all neighboring site indices for a given site.
+// Uses half-edge traversal to walk around the vertex.
+func GetAllNeighbors(mesh *DelaunayMesh, site SiteIndex) []SiteIndex {
+	neighbors := make([]SiteIndex, 0, 8)
+
+	startEdge := mesh.SiteEdge[site]
+	if startEdge == -1 {
+		return neighbors
+	}
+
+	edge := startEdge
+	visited := make(map[int]bool)
+
+	for {
+		if visited[edge] {
+			break
+		}
+		visited[edge] = true
+
+		dest := mesh.HalfEdges[edge].EdgeDest
+		neighbors = append(neighbors, dest)
+
+		twin := mesh.HalfEdges[edge].Twin
+		if twin == -1 {
+			break
+		}
+		edge = mesh.HalfEdges[twin].Next
+		if edge == startEdge {
+			break
+		}
+	}
+
+	return neighbors
+}
+
 // isNearLocalMaximum returns true if the site is higher than most neighbors.
 func IsNearLocalMaximum(mesh *DelaunayMesh, heights []float64, site SiteIndex) bool {
 	currentHeight := heights[site]

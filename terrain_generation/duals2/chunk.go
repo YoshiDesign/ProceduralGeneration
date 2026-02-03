@@ -225,6 +225,14 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 		chunk.MinX-cm.cfg.HaloWidth, chunk.MinZ-cm.cfg.HaloWidth,
 		chunk.MaxX+cm.cfg.HaloWidth, chunk.MaxZ+cm.cfg.HaloWidth)
 
+	// Get thermal erosion config for timing decisions
+	thermalCfg := cm.erosMgr.ThermalConfig()
+
+	// Run thermal erosion BEFORE hydraulic if configured
+	if thermalCfg.Enabled && thermalCfg.Timing == "before" {
+		cm.erosMgr.ThermalErosion(chunk, thermalCfg)
+	}
+
 	// Generate erosion height deltas on the erosion manager for this chunk
 	error := cm.erosMgr.HydraulicErosion(chunk, chunk.Spatial, cm.chunkSeeds[coord])
 	if error != nil {
@@ -234,6 +242,11 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 	for siteIdx, delta := range cm.erosMgr.ErosionHeightDeltas[chunk.Coord] {
 		chunk.Heights[siteIdx] += delta
 		chunk.Mesh.Sites[siteIdx].Height += delta
+	}
+
+	// Run thermal erosion AFTER hydraulic if configured (default)
+	if thermalCfg.Enabled && (thermalCfg.Timing == "after" || thermalCfg.Timing == "") {
+		cm.erosMgr.ThermalErosion(chunk, thermalCfg)
 	}
 
 	// Recompute face normals after erosion modifies heights
