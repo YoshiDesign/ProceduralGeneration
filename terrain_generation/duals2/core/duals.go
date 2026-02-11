@@ -27,10 +27,7 @@ type TerrainChunk struct {
 	// 0.0 = normal terrain, 1.0 = full watershed divide
 	// Used by vertex shader to elevate terrain at lake boundaries
 	WatershedWeights []float64
-
-	// Face normals per triangle (parallel to Mesh.Tris)
-	FaceNormals []Vec3
-
+	
 	// Spatial index for fast point location
 	Spatial *SpatialGrid
 
@@ -215,7 +212,6 @@ func orientation2D(a, b, p Vec2) float64 {
 	return (b.X-a.X)*(p.Y-a.Y) - (b.Y-a.Y)*(p.X-a.X)
 }
 
-// DUPLICATE FUNCTION: spatialGrid.go	
 // pointInTriangle checks if point p is inside triangle (a, b, c) using orientation tests.
 // Returns true if inside or on boundary.
 func pointInTriangle(a, b, c, p Vec2) bool {

@@ -188,7 +188,7 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 
 	// Track which points are in the core region
 	coreIndices := make([]core.SiteIndex, 0, len(allPoints))
-	// TODO - This might be able to occur sooner, during generateChunkPoints
+	// TODO - Ponder what it might mean to perform this step sooner, during point generation
 	for i, p := range allPoints {
 		if p.X >= chunk.MinX && p.X < chunk.MaxX && p.Y >= chunk.MinZ && p.Y < chunk.MaxZ {
 			coreIndices = append(coreIndices, core.SiteIndex(i))
@@ -210,6 +210,13 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 		heights[i] = h
 	}
 	chunk.Heights = heights
+
+	/*
+		If you'd like to employ a concurrent approach, do not compute neighbors during `generateChunkPoints`.
+		Each chunk can cache it's own inner halo region for its neighbors to access.
+		Right here is where we would query the chunk manager for our neighbors' halo regions, as soon as they're ready.
+		In other words, we would generate all chunks in parallel, and block here until their points are generated.
+	*/
 
 	// Build Delaunay triangulation
 	tris := core.Triangulate(allPoints)
@@ -238,6 +245,11 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 		hardnessMap = eros.ComputeHardnessMap(chunk, peakCfg.Hardness)
 		cm.erosMgr.SetHardnessMap(hardnessMap)
 	}
+
+	/**
+		It could be interesting to apply the height delta between Thermal and Hydraulic erosion,
+		so one acts upon the other. Or, if you're brave enough, interleave them.
+	*/
 
 	// Run thermal erosion BEFORE hydraulic if configured
 	if thermalCfg.Enabled && thermalCfg.Timing == "before" {
@@ -269,7 +281,7 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 	}
 
 	// Recompute face normals after erosion modifies heights
-	chunk.FaceNormals = mesh.AllFaceNormals(chunk.Heights)
+	chunk.Mesh.FaceNormals = mesh.AllFaceNormals(chunk.Heights)
 
 	// Initialize watershed weights to 0.0 (no watershed modification)
 	chunk.WatershedWeights = make([]float64, len(allPoints))
@@ -354,7 +366,6 @@ func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
 		overlapMaxX := min(maxX+halo, nMaxX)
 		overlapMaxZ := min(maxZ+halo, nMaxZ)
 
-		// Big ol' wtf right here
 		if overlapMinX >= overlapMaxX || overlapMinZ >= overlapMaxZ {
 			continue // No overlap
 		}
@@ -363,7 +374,7 @@ func (cm *ChunkManager) generateChunkPoints(coord core.ChunkCoord) []core.Vec2 {
 		coreNeighborPoints := cm.getOrGeneratePoints(neighbor)
 
 		/*
-			[Optimization]
+			[Potential Optimization]
 			Definitely a spot that can be optimized by caching the padded boundary within each chunk
 			that represents the halo region of neighboring chunks
 		*/

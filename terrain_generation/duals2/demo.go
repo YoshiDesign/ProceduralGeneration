@@ -184,8 +184,8 @@ func (d *DualsDemo) buildRenderData(chunk *core.TerrainChunk) {
 
 		// Compute color (same logic as drawChunk)
 		var r, g, b_col, alpha float32
-		if ti < len(chunk.FaceNormals) {
-			n := chunk.FaceNormals[ti]
+		if ti < len(chunk.Mesh.FaceNormals) {
+			n := chunk.Mesh.FaceNormals[ti]
 			intensity := n.Dot(light)
 			if intensity < 0 {
 				intensity = 0
