@@ -22,6 +22,7 @@ type DualsDemo struct {
 	OffsetZ       float64
 	ShowVoronoi   bool
 	ShowNormals   bool
+	ShowEdges     bool // Toggle Delaunay edge wireframe
 	ShowHydrology bool // Toggle hydrology visualization
 
 	// Debug UI for parameter tuning
@@ -103,6 +104,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 		OffsetZ:       float64(screenH) * 0.05,
 		ShowVoronoi:   false,
 		ShowNormals:   false,
+		ShowEdges:     true, // Enable edge wireframe by default
 		ShowHydrology: true, // Enable hydrology visualization by default
 		chunkCfg:      cfg, // Do not use for anything other than regeneration. Use the manager's config instead.
 	}
@@ -382,6 +384,11 @@ func (d *DualsDemo) Update() {
 		d.DebugUI.Toggle()
 	}
 
+	// Toggle edge wireframe with E key
+	if inpututil.IsKeyJustPressed(ebiten.KeyE) {
+		d.ShowEdges = !d.ShowEdges
+	}
+
 	// Update debug UI
 	d.DebugUI.Update()
 }
@@ -422,6 +429,13 @@ func (d *DualsDemo) Draw(screen *ebiten.Image) {
 		d.drawChunk(screen, chunk)
 	}
 
+	// Draw Delaunay edge wireframe on top of filled triangles
+	if d.ShowEdges {
+		for _, chunk := range d.Chunks {
+			d.drawChunkEdges(screen, chunk)
+		}
+	}
+
 	// Draw hydrology on top of terrain
 	if d.ShowHydrology {
 		for _, chunk := range d.Chunks {
@@ -458,6 +472,62 @@ func (d *DualsDemo) drawChunk(screen *ebiten.Image, chunk *core.TerrainChunk) {
 
 	// Single batched draw call for all triangles in this chunk
 	screen.DrawTriangles(chunk.RenderVertices, chunk.RenderIndices, emptyImage(), nil)
+}
+
+// drawChunkEdges renders wireframe edges for a terrain chunk's Delaunay mesh.
+func (d *DualsDemo) drawChunkEdges(screen *ebiten.Image, chunk *core.TerrainChunk) {
+	mesh := chunk.Mesh
+	if mesh == nil {
+		return
+	}
+
+	// Build core site set for filtering (same as buildRenderData)
+	coreSet := make(map[core.SiteIndex]struct{}, len(chunk.CoreSiteIndices))
+	for _, ci := range chunk.CoreSiteIndices {
+		coreSet[ci] = struct{}{}
+	}
+
+	edgeColor := color.RGBA{200, 200, 200, 80}
+
+	// Track drawn edges to avoid duplicates (each internal edge is shared by two triangles)
+	type edge struct{ a, b core.SiteIndex }
+	drawn := make(map[edge]struct{})
+
+	for _, t := range mesh.Tris {
+		// Only include triangles with at least one core vertex
+		_, aCore := coreSet[core.SiteIndex(t.A)]
+		_, bCore := coreSet[core.SiteIndex(t.B)]
+		_, cCore := coreSet[core.SiteIndex(t.C)]
+		if !aCore && !bCore && !cCore {
+			continue
+		}
+
+		// Draw each edge of the triangle
+		triEdges := [3][2]core.SiteIndex{
+			{t.A, t.B},
+			{t.B, t.C},
+			{t.C, t.A},
+		}
+
+		for _, e := range triEdges {
+			// Normalize edge direction for deduplication
+			a, b := e[0], e[1]
+			if a > b {
+				a, b = b, a
+			}
+			key := edge{a, b}
+			if _, ok := drawn[key]; ok {
+				continue
+			}
+			drawn[key] = struct{}{}
+
+			posA := mesh.Sites[e[0]].Pos
+			posB := mesh.Sites[e[1]].Pos
+			x1, y1 := d.worldToScreen(posA.X, posA.Y)
+			x2, y2 := d.worldToScreen(posB.X, posB.Y)
+			vector.StrokeLine(screen, x1, y1, x2, y2, 1, edgeColor, false)
+		}
+	}
 }
 
 // drawChunkBoundary draws the chunk boundary.

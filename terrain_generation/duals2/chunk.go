@@ -214,8 +214,12 @@ func (cm *ChunkManager) generateChunkInternal(coord core.ChunkCoord) (*core.Terr
 	/*
 		If you'd like to employ a concurrent approach, do not compute neighbors during `generateChunkPoints`.
 		Each chunk can cache it's own inner halo region for its neighbors to access.
-		Right here is where we would query the chunk manager for our neighbors' halo regions, as soon as they're ready.
+		Right here is where we would query the chunk manager for neighboring halo regions, as soon as they're ready.
 		In other words, we would generate all chunks in parallel, and block here until their points are generated.
+		Is there any work that could be done in the event that the neighbor's points are not yet ready?
+		Experiment with this: since you have heights, you could run erosion. Maybe running erosion independently won't look too non-convincing.
+		Also, computing face normals requires the mesh to be triangulated, so that might not be possible.
+		If erosion doesn't need to be sequential it can also be done in parallel.
 	*/
 
 	// Build Delaunay triangulation
