@@ -5,7 +5,7 @@ type SideIndex int //
 
 // ChunkCoord identifies a chunk by integer grid coordinates.
 type ChunkCoord struct {
-	X, Z int
+	X, Z int32
 }
 
 const (
@@ -36,7 +36,7 @@ type HalfEdge struct {
 }
 
 // DelaunayMesh holds topology + geometry.
-// It’s “Delaunay” if the triangles were produced by a Delaunay triangulation.
+// It’s "Delaunay" if the triangles were produced by a Delaunay triangulation.
 type DelaunayMesh struct {
 	Sites     []Site     // Vertices
 	Tris      []Triangle // Faces

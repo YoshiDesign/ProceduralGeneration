@@ -325,8 +325,7 @@ func (m *DelaunayMesh) VoronoiCellForSite(site SiteIndex) VoronoiCell {
 		}
 	}
 
-	// Optional: enforce CCW order around site center by sorting by angle.
-	// Ring-walk usually already provides correct order if triangle winding is consistent,
+	// Note: Ring-walk usually already provides correct order if triangle winding is consistent,
 	// but sorting gives stability during early prototyping.
 	angleSortAround(m.Sites[site].Pos, tris, verts)
 

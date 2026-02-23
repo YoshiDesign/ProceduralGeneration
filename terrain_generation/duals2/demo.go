@@ -81,7 +81,7 @@ func NewDualsDemo(screenW, screenH int) *DualsDemo {
 	chunks := make([]*core.TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
 	for cz := 0; cz < cfg.ChunksZ; cz++ {
 		for cx := 0; cx < cfg.ChunksX; cx++ {
-			coord := core.ChunkCoord{X: cx, Z: cz}
+			coord := core.ChunkCoord{X: int32(cx), Z: int32(cz)}
 			chunk, err := manager.GetOrGenerate(coord)
 			if err != nil {
 				continue
@@ -186,7 +186,7 @@ func (d *DualsDemo) buildRenderData(chunk *core.TerrainChunk) {
 
 		// Compute color (same logic as drawChunk)
 		var r, g, b_col, alpha float32
-		if ti < len(chunk.Mesh.FaceNormals) {
+		if ti < len(chunk.Mesh.FaceNormals) { // Face norms for flat shading :D
 			n := chunk.Mesh.FaceNormals[ti]
 			intensity := n.Dot(light)
 			if intensity < 0 {
@@ -407,7 +407,7 @@ func (d *DualsDemo) regenerate(noiseParams core.NoiseParams, hydroConfig hydro.H
 	d.Chunks = make([]*core.TerrainChunk, 0, cfg.ChunksZ * cfg.ChunksX)
 	for cz := 0; cz < d.Manager.cfg.ChunksZ; cz++ {
 		for cx := 0; cx < d.Manager.cfg.ChunksX; cx++ {
-			coord := core.ChunkCoord{X: cx, Z: cz}
+			coord := core.ChunkCoord{X: int32(cx), Z: int32(cz)}
 			chunk, err := d.Manager.GetOrGenerate(coord)
 			if err != nil {
 				continue

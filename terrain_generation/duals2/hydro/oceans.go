@@ -45,17 +45,17 @@ func (hm *HydroManager) GenerateOceanRegion(seedChunk core.ChunkCoord, worldSeed
 
 	ocean := &core.OceanRegion{
 		ID:        hm.NextOceanID,
-		MinChunkX: seedChunk.X - offsetX,
-		MinChunkZ: seedChunk.Z - offsetZ,
-		MaxChunkX: seedChunk.X - offsetX + extentX - 1,
-		MaxChunkZ: seedChunk.Z - offsetZ + extentZ - 1,
+		MinChunkX: int(seedChunk.X - int32(offsetX)),
+		MinChunkZ: int(seedChunk.Z - int32(offsetZ)),
+		MaxChunkX: int(seedChunk.X - int32(offsetX) + int32(extentX) - 1),
+		MaxChunkZ: int(seedChunk.Z - int32(offsetZ) + int32(extentZ) - 1),
 		SeaLevel:  hm.Cfg.SeaLevel,
 	}
 
 	// Register chunks as ocean
 	for x := ocean.MinChunkX; x <= ocean.MaxChunkX; x++ {
 		for z := ocean.MinChunkZ; z <= ocean.MaxChunkZ; z++ {
-			hm.OceanChunks[core.ChunkCoord{X: x, Z: z}] = ocean.ID
+			hm.OceanChunks[core.ChunkCoord{X: int32(x), Z: int32(z)}] = ocean.ID
 		}
 	}
 

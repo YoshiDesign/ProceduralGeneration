@@ -429,7 +429,7 @@ func (cm *ChunkManager) getOrGeneratePoints(coord core.ChunkCoord) []core.Vec2 {
 
 	cm.chunkSeeds[coord] = chunkseed // Cache on chunk manager
 
-	// Cache the generated points
+	// Cache the generated points``
 	cm.pointsCache[coord] = pts
 	return pts
 }
@@ -765,6 +765,40 @@ func chunkSeed(worldSeed int64, coord core.ChunkCoord) int64 {
 	h.Write(buf)
 
 	return int64(h.Sum64())
+}
+
+// chunkSeedCppMatch replicates the C++ implementation:
+//
+// uint64_t x = (uint32_t)c.x;
+// uint64_t z = (uint32_t)c.z;
+// uint64_t h = worldSeed ^ (x*C1) ^ (z*C2);
+// h ^= (h >> 30); h *= M1;
+// h ^= (h >> 27); h *= M2;
+// h ^= (h >> 31);
+// return h;
+func chunkSeedCppMatch(worldSeed uint64, c core.ChunkCoord) uint64 {
+	// Cast to uint32 to preserve two's-complement bit pattern for negatives,
+	// then widen to uint64 (zero-extend).
+	x := uint64(uint32(c.X))
+	z := uint64(uint32(c.Z))
+
+	const (
+		C1 = 0x9E3779B185EBCA87
+		C2 = 0xC2B2AE3D27D4EB4F
+
+		M1 = 0xBF58476D1CE4E5B9
+		M2 = 0x94D049BB133111EB
+	)
+
+	h := worldSeed ^ (x * C1) ^ (z * C2)
+
+	h ^= h >> 30
+	h *= M1
+	h ^= h >> 27
+	h *= M2
+	h ^= h >> 31
+
+	return h
 }
 
 // // SampleHeight returns the interpolated height at position (x, z).
